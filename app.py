@@ -19,7 +19,6 @@ st.set_page_config(page_title="ConciliaMais — Conferência de Extrato Bancári
 st.markdown(
     """
 <style>
-/* Layout geral */
 .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
 h1, h2, h3 { letter-spacing: -0.02em; }
 
@@ -34,6 +33,7 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 .cm-card .k { font-size: 12px; opacity: .80; margin-bottom: 6px; }
 .cm-card .v { font-size: 22px; font-weight: 700; }
 .cm-card .s { font-size: 12px; opacity: .75; margin-top: 6px; }
+
 .cm-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
 .cm-ok { background: rgba(34,197,94,.18); color: rgb(134,239,172); border: 1px solid rgba(34,197,94,.35); }
 .cm-warn { background: rgba(245,158,11,.18); color: rgb(253,230,138); border: 1px solid rgba(245,158,11,.35); }
@@ -41,8 +41,6 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 
 /* Seções */
 .cm-section { margin-top: 18px; }
-
-/* Helper */
 .cm-help { opacity: .78; font-size: 13px; margin-top: -6px; }
 
 /* Mini card (Total do filtro) */
@@ -55,6 +53,18 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 }
 .cm-mini .k { font-size: 12px; opacity: .80; margin-bottom: 4px; }
 .cm-mini .v { font-size: 20px; font-weight: 800; letter-spacing: -0.01em; }
+
+/* Painel detalhe */
+.cm-detail {
+  border-radius: 16px;
+  padding: 14px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+}
+.cm-detail .title { font-size: 14px; font-weight: 800; margin-bottom: 10px; }
+.cm-detail .row { font-size: 13px; opacity: .90; margin: 4px 0; }
+.cm-detail .label { opacity: .70; }
+.cm-detail .val { font-weight: 600; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -257,6 +267,38 @@ def extract_doc_from_ledger_history(x):
 
     return ""
 
+def classify_motivo(row):
+    origem = str(row.get("ORIGEM", "")).strip().lower()
+    doc = str(row.get("DOCUMENTO", "")).strip()
+    chave = str(row.get("CHAVE_DOC", "")).strip()
+    hist = str(row.get("HISTORICO_OPERACAO", "")).strip().lower()
+    valor = row.get("VALOR", np.nan)
+
+    if pd.isna(valor) or abs(float(valor)) < 1e-12:
+        return ""
+
+    if doc == "" and chave == "":
+        return "Documento/Chave não identificados"
+    if doc == "" and chave != "":
+        return "Documento não identificado (chave encontrada)"
+    if doc != "" and chave == "":
+        return "Chave não encontrada no histórico"
+
+    # sinais no histórico
+    if any(k in hist for k in ["tarifa", "juros", "iof", "multa", "encargo"]):
+        return "Encargo bancário (tarifa/juros/IOF)"
+    if any(k in hist for k in ["baixa", "pg", "pag", "pagto", "pagamento"]):
+        return "Possível baixa/pagamento"
+    if any(k in hist for k in ["pix", "ted", "doc ", "transfer", "transf", "depósito", "deposito"]):
+        return "Transferência/Mov. bancária"
+
+    if "somente financeiro" in origem:
+        return "Financeiro sem lançamento contábil"
+    if "somente contábil" in origem:
+        return "Contábil sem movimento no extrato"
+
+    return "Revisar histórico do lançamento"
+
 def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     f, l = build_normalized(fin_df, led_df, cfg)
 
@@ -336,7 +378,6 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     diff_esperada = np.nan if pd.isna(diff_saldo_ant) else round(diff_saldo_ant + impacto, 2)
     conferencia = np.nan if (pd.isna(diff_final) or pd.isna(diff_esperada)) else round(diff_final - diff_esperada, 2)
 
-    # Divergências humanizadas (duas “visões”)
     fin_rows = []
     fin_reset = fin_df.reset_index(drop=True)
     for _, r in fin_only.iterrows():
@@ -392,118 +433,106 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
 
     return div, stats
 
-def build_tratativa(div):
-    if div is None or div.empty:
-        return pd.DataFrame(columns=[
-            "ORIGEM","DATA","IDENTIFICADOR","HISTORICO_OPERACAO","VALOR",
-            "ACAO_SUGERIDA","RESPONSAVEL","PRAZO","STATUS","OBS"
-        ])
-    def ident(row):
-        parts = []
-        doc = str(row.get("DOCUMENTO","")).strip()
-        if doc: parts.append(f"DOC:{doc}")
-        return " | ".join(parts)[:140]
-    t = pd.DataFrame({
-        "ORIGEM": div["ORIGEM"],
-        "DATA": div["DATA"],
-        "IDENTIFICADOR": div.apply(ident, axis=1),
-        "HISTORICO_OPERACAO": div.get("HISTORICO_OPERACAO",""),
-        "VALOR": div["VALOR"],
-        "ACAO_SUGERIDA": "",
-        "RESPONSAVEL": "",
-        "PRAZO": "",
-        "STATUS": "Pendente",
-        "OBS": "",
-    })
-    return t
-
 # ----------------------------
 # Export Excel (filtrado, formatado)
 # ----------------------------
-def _autofit_worksheet(ws, df, header_row, start_col, max_width=60, min_width=10):
-    # Estima largura por tamanho do texto (simples e eficiente)
+def _autofit_worksheet(ws, df, start_col, max_width=70, min_width=10):
     for j, col in enumerate(df.columns):
         ser = df[col].astype(str).fillna("")
-        sample = ser.head(200).tolist()
+        sample = ser.head(250).tolist()
         max_len = max([len(str(col))] + [len(s) for s in sample]) if sample else len(str(col))
         width = max(min_width, min(max_width, max_len + 2))
         ws.set_column(start_col + j, start_col + j, width)
 
-def to_excel_divergencias_filtradas(df_filtrado, total_filtrado, stats, generated_at):
+def to_excel_divergencias_filtradas(
+    df_filtrado: pd.DataFrame,
+    total_filtrado: float,
+    filtros: dict,
+    stats: dict,
+    generated_at: str
+) -> BytesIO:
     out = BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as w:
         wb = w.book
 
         fmt_title = wb.add_format({"bold": True, "font_size": 14})
         fmt_k = wb.add_format({"bold": True, "font_size": 10, "font_color": "#666666"})
-        fmt_money = wb.add_format({"num_format": "#,##0.00", "border": 1})
-        fmt_hdr = wb.add_format({"bold": True, "border": 1, "align": "center", "valign": "vcenter"})
         fmt_txt = wb.add_format({"border": 1})
-        fmt_date = wb.add_format({"num_format": "yyyy-mm-dd", "border": 1})
+        fmt_hdr = wb.add_format({"bold": True, "border": 1, "align": "center", "valign": "vcenter"})
+        fmt_date = wb.add_format({"num_format": "dd/mm/yyyy", "border": 1})
+        fmt_money = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "border": 1})
+        fmt_money_big = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "bold": True})
 
-        # Aba Divergencias
         sh = "Divergencias"
         df = df_filtrado.copy()
 
-        # Garantir tipos
+        # Tipos
         if "DATA" in df.columns:
-            # manter como texto/ date; xlsxwriter lida melhor com datetime
             df["DATA"] = pd.to_datetime(df["DATA"], errors="coerce")
         if "VALOR" in df.columns:
             df["VALOR"] = df["VALOR"].map(normalize_money)
 
-        df.to_excel(w, index=False, sheet_name=sh, startrow=4)
+        # escreve tabela (a partir de row 7)
+        start_row_table = 7
+        df.to_excel(w, index=False, sheet_name=sh, startrow=start_row_table)
+
         ws = w.sheets[sh]
 
-        # Cabeçalho de contexto
-        ws.write(0, 0, "ConciliaMais — Divergências (Filtrado)", fmt_title)
+        # Cabeçalho/contexto
+        ws.write(0, 0, "ConciliaMais — Divergências (Excel igual à tela)", fmt_title)
         ws.write(1, 0, "Processado em:", fmt_k)
         ws.write(1, 1, generated_at)
-        ws.write(2, 0, "Total do filtro:", fmt_k)
-        ws.write_number(2, 1, float(total_filtrado or 0.0), fmt_money)
 
-        # Formatar cabeçalho da tabela
-        ws.set_row(4, 20, fmt_hdr)
-        ws.freeze_panes(5, 0)
+        ws.write(2, 0, "Origem:", fmt_k)
+        ws.write(2, 1, filtros.get("origem", "Todas"))
+        ws.write(3, 0, "Ordenação:", fmt_k)
+        ws.write(3, 1, filtros.get("ordenar", "DATA"))
+        ws.write(4, 0, "Busca:", fmt_k)
+        ws.write(4, 1, filtros.get("busca", ""))
 
-        # Bordas/format por coluna
-        start_row = 5
-        start_col = 0
+        ws.write(2, 3, "Total do filtro:", fmt_k)
+        ws.write_number(2, 4, float(total_filtrado or 0.0), fmt_money_big)
+
+        # Formatar cabeçalho
+        ws.set_row(start_row_table, 20, fmt_hdr)
+        ws.freeze_panes(start_row_table + 1, 0)
+
         nrows = len(df)
         ncols = len(df.columns)
 
-        # Aplicar formatos em colunas específicas
+        # Table do Excel
+        if nrows > 0 and ncols > 0:
+            table_last_row = start_row_table + nrows
+            table_last_col = ncols - 1
+            ws.add_table(
+                start_row_table, 0, table_last_row, table_last_col,
+                {
+                    "style": "Table Style Medium 9",
+                    "columns": [{"header": c} for c in df.columns],
+                    "autofilter": True
+                }
+            )
+
+        # Aplicar formatação por coluna
         col_idx = {c: i for i, c in enumerate(df.columns)}
         for r in range(nrows):
-            excel_r = start_row + r
+            excel_r = start_row_table + 1 + r
             for c, j in col_idx.items():
                 val = df.iloc[r, j]
                 if c == "VALOR":
                     if pd.notna(val):
-                        ws.write_number(excel_r, start_col + j, float(val), fmt_money)
+                        ws.write_number(excel_r, j, float(val), fmt_money)
                     else:
-                        ws.write_blank(excel_r, start_col + j, None, fmt_money)
+                        ws.write_blank(excel_r, j, None, fmt_money)
                 elif c == "DATA":
                     if pd.notna(val):
-                        ws.write_datetime(excel_r, start_col + j, val.to_pydatetime(), fmt_date)
+                        ws.write_datetime(excel_r, j, val.to_pydatetime(), fmt_date)
                     else:
-                        ws.write_blank(excel_r, start_col + j, None, fmt_date)
+                        ws.write_blank(excel_r, j, None, fmt_date)
                 else:
-                    ws.write(excel_r, start_col + j, "" if pd.isna(val) else str(val), fmt_txt)
+                    ws.write(excel_r, j, "" if pd.isna(val) else str(val), fmt_txt)
 
-        # Tabela com filtro
-        ws.autofilter(4, 0, 4 + nrows, max(ncols - 1, 0))
-
-        # Auto fit
-        _autofit_worksheet(ws, df, header_row=4, start_col=0)
-
-        # Aba Tratativa
-        trat = build_tratativa(df_filtrado)
-        trat.to_excel(w, index=False, sheet_name="Tratativa")
-        ws2 = w.sheets["Tratativa"]
-        ws2.freeze_panes(1, 0)
-        ws2.set_row(0, 20, fmt_hdr)
-        _autofit_worksheet(ws2, trat, header_row=0, start_col=0, max_width=65)
+        _autofit_worksheet(ws, df, start_col=0)
 
         # Aba Resumo (executivo no Excel)
         resumo = pd.DataFrame([
@@ -526,15 +555,15 @@ def to_excel_divergencias_filtradas(df_filtrado, total_filtrado, stats, generate
         ws3.freeze_panes(1, 0)
         ws3.set_row(0, 20, fmt_hdr)
         ws3.set_column(0, 0, 62)
-        ws3.set_column(1, 1, 22, wb.add_format({"num_format": "#,##0.00"}))
+        ws3.set_column(1, 1, 26, wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'}))
 
     out.seek(0)
     return out
 
 # ----------------------------
-# PDF Resumo (sem gráfico)
+# PDF Resumo (sem gráfico, com TOP 10 + conclusão)
 # ----------------------------
-def to_pdf_resumo(stats, generated_at):
+def to_pdf_resumo(stats: dict, generated_at: str, div_all: pd.DataFrame):
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -544,13 +573,12 @@ def to_pdf_resumo(stats, generated_at):
     styles = getSampleStyleSheet()
     story = []
 
-    title = "Relatório de Resumo — ConciliaMais (Conferência de Extrato Bancário)"
+    title = "Relatório de Conciliação Bancária — ConciliaMais (Módulo 1)"
     story.append(Paragraph(title, styles["Title"]))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 6))
     story.append(Paragraph(f"Processado em: {generated_at}", styles["Normal"]))
     story.append(Spacer(1, 14))
 
-    # KPIs
     fin_total = int(stats.get("fin_total", 0))
     led_total = int(stats.get("led_total", 0))
     pairs = int(stats.get("fin_conc", 0))
@@ -559,6 +587,9 @@ def to_pdf_resumo(stats, generated_at):
     pend_itens = max(total_itens - matched_itens, 0)
     pct = (matched_itens / total_itens * 100.0) if total_itens else 0.0
 
+    story.append(Paragraph("Resumo executivo", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+
     kpi_data = [
         ["Indicador", "Valor"],
         ["MATCH (itens)", f"{matched_itens} / {total_itens}  ({pct:.1f}%)"],
@@ -566,7 +597,6 @@ def to_pdf_resumo(stats, generated_at):
         ["Valor a conciliar (Fin - Cont)", fmt(stats.get("impacto", 0.0))],
         ["Conferência (ideal 0,00)", fmt(stats.get("conferencia", np.nan))],
     ]
-
     t1 = Table(kpi_data, colWidths=[220, 280])
     t1.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
@@ -576,12 +606,12 @@ def to_pdf_resumo(stats, generated_at):
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F9FAFB")]),
     ]))
-    story.append(Paragraph("Resumo executivo", styles["Heading2"]))
-    story.append(Spacer(1, 6))
     story.append(t1)
     story.append(Spacer(1, 14))
 
-    # Composição de saldos
+    story.append(Paragraph("Composição de saldos", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+
     comp = [
         ["Composição de saldos", "Valor"],
         ["Saldo anterior (antes do 1º movimento) – Financeiro", fmt(stats.get("saldo_ant_fin", np.nan))],
@@ -607,9 +637,60 @@ def to_pdf_resumo(stats, generated_at):
         ("VALIGN", (0,0), (-1,-1), "TOP"),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F9FAFB")]),
     ]))
-    story.append(Paragraph("Composição de saldos", styles["Heading2"]))
-    story.append(Spacer(1, 6))
     story.append(t2)
+    story.append(Spacer(1, 14))
+
+    # Top 10 divergências por valor (absoluto)
+    story.append(Paragraph("Principais divergências (Top 10 por valor)", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+
+    top = div_all.copy()
+    top = top[top["VALOR"].notna()].copy()
+    if not top.empty:
+        top["__abs"] = top["VALOR"].abs()
+        top = top.sort_values("__abs", ascending=False).head(10).drop(columns=["__abs"])
+        top_rows = [["Origem", "Data", "Documento", "Valor", "Motivo provável"]]
+        for _, r in top.iterrows():
+            dt = r.get("DATA")
+            dt_txt = ""
+            try:
+                if pd.notna(dt):
+                    dt_txt = pd.to_datetime(dt).strftime("%d/%m/%Y")
+            except Exception:
+                dt_txt = str(dt)
+            top_rows.append([
+                str(r.get("ORIGEM","")),
+                dt_txt,
+                str(r.get("DOCUMENTO",""))[:22],
+                fmt(r.get("VALOR", np.nan)),
+                str(r.get("MOTIVO_PROVÁVEL",""))[:38],
+            ])
+        t3 = Table(top_rows, colWidths=[95, 70, 110, 70, 155])
+        t3.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#D1D5DB")),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F9FAFB")]),
+        ]))
+        story.append(t3)
+    else:
+        story.append(Paragraph("Não há divergências para exibir.", styles["Normal"]))
+
+    story.append(Spacer(1, 14))
+
+    # Conclusão automática
+    conf = stats.get("conferencia", np.nan)
+    conclu = "Conclusão: Conciliação pendente — revisar divergências e refazer conferência."
+    try:
+        if pd.notna(conf) and abs(float(conf)) <= 0.01:
+            conclu = "Conclusão: Conciliação fechada — conferência zerada (0,00)."
+    except Exception:
+        pass
+    story.append(Paragraph("Conclusão", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(conclu, styles["Normal"]))
 
     doc.build(story)
     buf.seek(0)
@@ -767,17 +848,16 @@ else:
     stats = res["stats"]
     generated_at = res["generated_at"]
 
-    # LIMPEZA: remover VALOR 0/NaN e limpar nan/None em textos
+    # LIMPEZA + normalização
     div["VALOR"] = div["VALOR"].map(normalize_money)
     div = div[div["VALOR"].notna()].copy()
-    div = div[div["VALOR"].abs() > 0.0000001].copy()
+    div = div[div["VALOR"].abs() > 1e-12].copy()
 
     for c in ["DOCUMENTO", "PREFIXO_TITULO", "HISTORICO_OPERACAO", "CHAVE_DOC"]:
         if c in div.columns:
             div[c] = div[c].replace({np.nan: "", "nan": "", "None": ""}).astype(str).str.strip()
 
     # Documento padronizado:
-    # Financeiro: DOCUMENTO = PREFIXO_TITULO (quando existir)
     mask_fin = div["ORIGEM"].eq("Somente Financeiro")
     if "PREFIXO_TITULO" in div.columns:
         div.loc[mask_fin, "DOCUMENTO"] = div.loc[mask_fin, "PREFIXO_TITULO"].where(
@@ -785,25 +865,29 @@ else:
             div.loc[mask_fin, "DOCUMENTO"]
         )
 
-    # Contábil: mantém lógica do reconcile; reforço se vier vazio
     mask_led = div["ORIGEM"].eq("Somente Contábil")
     if "HISTORICO_OPERACAO" in div.columns:
         missing = mask_led & (div["DOCUMENTO"].astype(str).str.len() == 0)
         div.loc[missing, "DOCUMENTO"] = div.loc[missing, "HISTORICO_OPERACAO"].map(extract_doc_from_ledger_history)
 
-    # Remover coluna PREFIXO_TITULO (não queremos mais ver)
+    # Remover colunas não desejadas
     if "PREFIXO_TITULO" in div.columns:
         div = div.drop(columns=["PREFIXO_TITULO"])
-
-    # Remover coluna CONTA, se existir
     if "CONTA" in div.columns:
         div = div.drop(columns=["CONTA"])
+
+    # Motivo provável
+    div["MOTIVO_PROVÁVEL"] = div.apply(classify_motivo, axis=1)
+
+    # Data como datetime pra ordenação/exports
+    if "DATA" in div.columns:
+        div["DATA"] = pd.to_datetime(div["DATA"], errors="coerce")
 
     # Processado em
     st.caption(f"Processado em: {generated_at}")
 
     # ----------------
-    # Cards (ajustes)
+    # Cards (PRO)
     # ----------------
     pairs = int(stats.get("fin_conc", 0))
     fin_total = int(stats.get("fin_total", 0))
@@ -856,7 +940,7 @@ else:
     st.bar_chart(chart_df)
 
     # ----------------
-    # Divergências: filtros + total alinhado
+    # Divergências: filtros + total alinhado + detalhe
     # ----------------
     st.markdown("### Divergências (itens não pareados)")
 
@@ -874,7 +958,7 @@ else:
 
     if busca.strip():
         q = busca.strip().lower()
-        cols_search = [c for c in df.columns if c in ["DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC"]]
+        cols_search = [c for c in df.columns if c in ["DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "MOTIVO_PROVÁVEL"]]
         mask = False
         for c in cols_search:
             mask = mask | df[c].astype(str).str.lower().str.contains(q, na=False)
@@ -896,18 +980,109 @@ else:
             unsafe_allow_html=True,
         )
 
-    # Garantir ordem de colunas “limpa”
-    col_order = [c for c in ["ORIGEM", "DATA", "DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "VALOR"] if c in df.columns]
+    # Ordem “limpa”
+    col_order = [c for c in ["ORIGEM", "DATA", "DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "VALOR", "MOTIVO_PROVÁVEL"] if c in df.columns]
     df = df[col_order].copy()
 
-    st.dataframe(df, use_container_width=True, height=420)
+    # Visual: DATA dd/mm/aaaa na tela
+    df_display = df.copy()
+    if "DATA" in df_display.columns:
+        df_display["DATA"] = df_display["DATA"].dt.strftime("%d/%m/%Y").fillna("")
+
+    # Layout com painel detalhe
+    tcol, dcol = st.columns([3.2, 1.3])
+
+    selected_row = None
+    with tcol:
+        # Seleção por clique (se a versão do streamlit suportar); fallback com seletor.
+        selection_supported = False
+        try:
+            event = st.dataframe(
+                df_display,
+                use_container_width=True,
+                height=420,
+                hide_index=True,
+                selection_mode="single-row",
+                on_select="rerun",
+                key="div_table",
+            )
+            selection_supported = True
+            if event and hasattr(event, "selection") and event.selection and event.selection.get("rows"):
+                ridx = event.selection["rows"][0]
+                if 0 <= ridx < len(df):
+                    selected_row = df.iloc[ridx]
+        except TypeError:
+            # streamlit sem seleção no dataframe
+            st.dataframe(df_display, use_container_width=True, height=420, hide_index=True)
+
+        if not selection_supported:
+            # Fallback: seletor (sem perder a prática)
+            options = []
+            for i, r in df_display.head(500).reset_index(drop=True).iterrows():
+                options.append(f"{i+1:03d} | {r.get('ORIGEM','')} | {r.get('DATA','')} | DOC:{r.get('DOCUMENTO','')[:18]} | {fmt(df.iloc[i]['VALOR'])}")
+            if len(options) > 0:
+                pick = st.selectbox("Selecionar item para detalhe (fallback)", ["(nenhum)"] + options, index=0)
+                if pick != "(nenhum)":
+                    pos = int(pick.split("|")[0].strip()) - 1
+                    if 0 <= pos < len(df):
+                        selected_row = df.iloc[pos]
+
+    with dcol:
+        st.markdown(
+            """
+<div class="cm-detail">
+  <div class="title">Detalhe do item</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        if selected_row is not None:
+            # Monta resumo copiável
+            dt_txt = ""
+            try:
+                if pd.notna(selected_row.get("DATA")):
+                    dt_txt = pd.to_datetime(selected_row.get("DATA")).strftime("%d/%m/%Y")
+            except Exception:
+                dt_txt = str(selected_row.get("DATA") or "")
+
+            resumo = (
+                f"ORIGEM: {selected_row.get('ORIGEM','')}\n"
+                f"DATA: {dt_txt}\n"
+                f"DOCUMENTO: {selected_row.get('DOCUMENTO','')}\n"
+                f"CHAVE: {selected_row.get('CHAVE_DOC','')}\n"
+                f"VALOR: {fmt(selected_row.get('VALOR', np.nan))}\n"
+                f"MOTIVO_PROVÁVEL: {selected_row.get('MOTIVO_PROVÁVEL','')}\n"
+                f"HISTÓRICO: {selected_row.get('HISTORICO_OPERACAO','')}"
+            )
+
+            st.markdown(
+                f"""
+<div class="cm-detail">
+  <div class="title">Detalhe do item</div>
+  <div class="row"><span class="label">Origem:</span> <span class="val">{selected_row.get('ORIGEM','')}</span></div>
+  <div class="row"><span class="label">Data:</span> <span class="val">{dt_txt}</span></div>
+  <div class="row"><span class="label">Documento:</span> <span class="val">{selected_row.get('DOCUMENTO','')}</span></div>
+  <div class="row"><span class="label">Chave:</span> <span class="val">{selected_row.get('CHAVE_DOC','')}</span></div>
+  <div class="row"><span class="label">Valor:</span> <span class="val">{fmt(selected_row.get('VALOR', np.nan))}</span></div>
+  <div class="row"><span class="label">Motivo provável:</span> <span class="val">{selected_row.get('MOTIVO_PROVÁVEL','')}</span></div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+            st.text_area("Copiar resumo (e-mail/ticket)", value=resumo, height=160)
+        else:
+            st.caption("Selecione um item na tabela para ver o detalhe.")
 
     # ----------------
     # Exportar
     # ----------------
     st.markdown("### Exportar")
 
-    excel_bytes = to_excel_divergencias_filtradas(df, total_filtrado, stats, generated_at)
+    filtros = {"origem": origem, "ordenar": ordenar, "busca": busca.strip()}
+
+    excel_bytes = to_excel_divergencias_filtradas(df, total_filtrado, filtros, stats, generated_at)
     st.download_button(
         "Baixar Divergências (Excel) — exatamente como filtrado",
         data=excel_bytes,
@@ -915,9 +1090,10 @@ else:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    pdf_bytes = to_pdf_resumo(stats, generated_at)
+    # PDF Resumo (geral: usa todas divergências pós limpeza, não o filtro)
+    pdf_bytes = to_pdf_resumo(stats, generated_at, div_all=div[col_order].copy())
     st.download_button(
-        "Baixar Relatório Resumo (PDF)",
+        "Baixar Relatório Resumo (PDF) — executivo",
         data=pdf_bytes,
         file_name=f"ConciliaMais_Resumo_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
         mime="application/pdf",
