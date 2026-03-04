@@ -226,35 +226,65 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
 
     # Outputs with status
     f_out = fin_df.copy()
-    f_out["CONCILIADO?"] = f["__idx"].map(lambda x: "S" if int(x) in fin_match else "N")
+    f_out["STATUS"] = f_out["CONCILIADO?"].map(lambda x: "✅ Conciliado" if x == "S" else "❌ Pendente")
     f_out["PAREADO_COM_IDX_CONTABIL"] = f["__idx"].map(lambda x: fin_match.get(int(x), ""))
 
     l_out = led_df.copy()
-    l_out["CONCILIADO?"] = l["__idx"].map(lambda x: "S" if int(x) in led_match else "N")
+    l_out["STATUS"] = l_out["CONCILIADO?"].map(lambda x: "✅ Conciliado" if x == "S" else "❌ Pendente")
     l_out["PAREADO_COM_IDX_FINANCEIRO"] = l["__idx"].map(lambda x: led_match.get(int(x), ""))
 
     fin_only = f[~f["__idx"].astype(int).isin(fin_match.keys())].copy()
     led_only = l[~l["__idx"].astype(int).isin(led_match.keys())].copy()
 
-    def build_div(df, origin_label):
-        rows = []
-        for _, r in df.iterrows():
-            rows.append({
-                "DATA": r["__date"],
-                "CHAVE_DOC": r["__doc_key"],
-                "HISTÓRICO/OPERAÇÃO": str(r["__text"]).strip(),
-                "VALOR": round(float(r["__amount"]), 2),
-                "ORIGEM": origin_label,
-                "IDX_ORIGEM": int(r["__idx"]),
-                "SALDO_NA_LINHA": r["__saldo"],
-                "PAREADO?": "N",
-            })
-        return pd.DataFrame(rows)
+def build_div_fin(fin_only_norm):
+    # Divergências do Financeiro com campos "reconhecíveis"
+    rows = []
+    fin_by_idx = fin_df.reset_index(drop=True)
 
-    div = pd.concat([
-        build_div(fin_only, "Somente Financeiro"),
-        build_div(led_only, "Somente Contábil"),
-    ], ignore_index=True)
+    for _, r in fin_only_norm.iterrows():
+        i = int(r["__idx"])
+        base = fin_by_idx.iloc[i] if 0 <= i < len(fin_by_idx) else pd.Series(dtype="object")
+
+        rows.append({
+            "ORIGEM": "Somente Financeiro",
+            "DATA": r["__date"],
+            "DOCUMENTO": (str(base.get(cfg.get("fin_documento"), "")) if cfg.get("fin_documento") else ""),
+            "PREFIXO/TITULO": (str(base.get(cfg.get("fin_prefixo"), "")) if cfg.get("fin_prefixo") else ""),
+            "OPERACAO/HISTORICO": (str(base.get(cfg.get("fin_operacao"), "")) if cfg.get("fin_operacao") else str(r["__text"]).strip()),
+            "CHAVE_DOC": r["__doc_key"],
+            "VALOR": round(float(r["__amount"]), 2),
+            "SALDO_NA_LINHA": (round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan),
+        })
+    return pd.DataFrame(rows)
+
+def build_div_led(led_only_norm):
+    # Divergências do Contábil com campos "reconhecíveis"
+    rows = []
+    led_by_idx = led_df.reset_index(drop=True)
+
+    for _, r in led_only_norm.iterrows():
+        i = int(r["__idx"])
+        base = led_by_idx.iloc[i] if 0 <= i < len(led_by_idx) else pd.Series(dtype="object")
+
+        rows.append({
+            "ORIGEM": "Somente Contábil",
+            "DATA": r["__date"],
+            "LOTE/SUB/DOC/LINHA": (str(base.get(cfg.get("led_doc"), "")) if cfg.get("led_doc") else ""),
+            "CONTA": (str(base.get(cfg.get("led_conta"), "")) if cfg.get("led_conta") else ""),
+            "HISTORICO": (str(base.get(cfg.get("led_historico"), "")) if cfg.get("led_historico") else str(r["__text"]).strip()),
+            "CHAVE_DOC": r["__doc_key"],
+            "VALOR": round(float(r["__amount"]), 2),
+            "SALDO_NA_LINHA": (round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan),
+        })
+    return pd.DataFrame(rows)
+
+div = pd.concat(
+    [
+        build_div_fin(fin_only),
+        build_div_led(led_only),
+    ],
+    ignore_index=True
+)
 
     # Summary numbers
     fin_total = round(float(f["__amount"].sum()), 2)
@@ -286,8 +316,7 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
         "Impacto líquido pendentes (Fin - Cont)": impacto,
         "Diferença esperada (Dif. saldo anterior + Impacto)": diff_esperada,
         "Conferência (Dif. final - Dif. esperada) → precisa zerar": conferencia,
-        "Total Financeiro (soma movimentos)": fin_total,
-        "Total Contábil (soma lançamentos)": led_total,
+
     }
 
     return f_out, l_out, div, resumo
