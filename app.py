@@ -96,14 +96,35 @@ def auto_detect_ledger(df):
         credito=pick("credito", "crédito", "credit"),
         saldo=pick("saldo atual", "saldo", "saldo_atual"),
         historico=pick("historico", "histórico", "operacao", "operação", "descricao", "descrição"),
-        doc=pick("lote/sub/doc/linha", "documento", "doc", "num documento"),
+        doc=pick("lote/sub/doc/linha", "documento", "doc", "num documento", "lote"),
         conta=pick("conta"),
         valor=pick("valor", "vlr"),
     )
 
 
+def compute_saldo_anterior(df_norm):
+    dfv = df_norm.copy()
+    dfv = dfv[dfv["__date"].notna()].copy()
+    dfv = dfv[dfv["__amount"].notna()].copy()
+    dfv = dfv[dfv["__saldo"].notna()].copy()
+    if dfv.empty:
+        return np.nan
+    r = dfv.iloc[0]
+    return round(float(r["__saldo"]) - float(r["__amount"]), 2)
+
+
+def compute_saldo_final(df_norm):
+    dfv = df_norm.copy()
+    dfv = dfv[dfv["__date"].notna()].copy()
+    dfv = dfv[dfv["__amount"].notna()].copy()
+    dfv = dfv[dfv["__saldo"].notna()].copy()
+    if dfv.empty:
+        return np.nan
+    r = dfv.iloc[-1]
+    return round(float(r["__saldo"]), 2)
+
+
 def build_normalized(fin_df, led_df, cfg):
-    # Finance
     f = fin_df.copy()
     f["__date"] = _to_date_series(f[cfg["fin_date"]])
 
@@ -127,11 +148,11 @@ def build_normalized(fin_df, led_df, cfg):
         + (f[doc_col].astype(str) if doc_col else "")
         + " "
         + (f[pre_col].astype(str) if pre_col else "")
-    )
+    ).astype(str)
+
     f["__doc_key"] = f["__text"].map(extract_doc_key)
     f["__idx"] = np.arange(len(f))
 
-    # Ledger
     l = led_df.copy()
     l["__date"] = _to_date_series(l[cfg["led_date"]])
 
@@ -155,35 +176,11 @@ def build_normalized(fin_df, led_df, cfg):
         + (l[doc_col2].astype(str) if doc_col2 else "")
         + " "
         + (l[conta_col].astype(str) if conta_col else "")
-    )
+    ).astype(str)
+
     l["__doc_key"] = l["__text"].map(extract_doc_key)
     l["__idx"] = np.arange(len(l))
-
     return f, l
-
-
-def compute_saldo_anterior(df_norm):
-    # usa SOMENTE linhas de movimento (DATA preenchida)
-    dfv = df_norm.copy()
-    dfv = dfv[dfv["__date"].notna()].copy()
-    dfv = dfv[dfv["__amount"].notna()].copy()
-    dfv = dfv[dfv["__saldo"].notna()].copy()
-    if dfv.empty:
-        return np.nan
-    r = dfv.iloc[0]
-    return round(float(r["__saldo"]) - float(r["__amount"]), 2)
-
-
-def compute_saldo_final(df_norm):
-    # usa SOMENTE linhas de movimento (DATA preenchida)
-    dfv = df_norm.copy()
-    dfv = dfv[dfv["__date"].notna()].copy()
-    dfv = dfv[dfv["__amount"].notna()].copy()
-    dfv = dfv[dfv["__saldo"].notna()].copy()
-    if dfv.empty:
-        return np.nan
-    r = dfv.iloc[-1]
-    return round(float(r["__saldo"]), 2)
 
 
 def reconcile(fin_df, led_df, cfg, date_tol_days=0):
@@ -193,42 +190,44 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     fin_match = {}
     led_match = {}
 
-    def try_match(fin_row_idx, candidates):
+    # Index ledger by (amount, doc_key)
+    key_to_led = {}
+    for _, r in l.iterrows():
+        if pd.isna(r["__amount"]):
+            continue
+        amt = round(float(r["__amount"]), 2)
+        key = (amt, r["__doc_key"])
+        key_to_led.setdefault(key, []).append(int(r["__idx"]))
+
+    def try_match(fin_idx, candidates):
         for li in candidates:
             if li in ledger_used:
                 continue
             ledger_used.add(li)
-            fin_match[fin_row_idx] = li
-            led_match[li] = fin_row_idx
+            fin_match[fin_idx] = li
+            led_match[li] = fin_idx
             return True
         return False
 
-    # Index ledger by (amount, doc_key)
-    key_to_led = {}
-    for _, r in l.iterrows():
-        try:
-            amt = round(float(r["__amount"]), 2)
-        except Exception:
-            continue
-        key = (amt, r["__doc_key"])
-        key_to_led.setdefault(key, []).append(int(r["__idx"]))
-
     # Primary: amount + doc_key
     for _, r in f.iterrows():
-        if r["__doc_key"]:
+        fi = int(r["__idx"])
+        if r["__doc_key"] and pd.notna(r["__amount"]):
             key = (round(float(r["__amount"]), 2), r["__doc_key"])
             if key in key_to_led:
-                try_match(int(r["__idx"]), key_to_led[key])
+                try_match(fi, key_to_led[key])
 
-    # Secondary: amount + date (with tolerance)
+    # Secondary: amount + date (tolerance)
     amt_to_led = {}
     for _, r in l.iterrows():
+        if pd.isna(r["__amount"]):
+            continue
         amt_to_led.setdefault(round(float(r["__amount"]), 2), []).append(int(r["__idx"]))
     l_by_idx = l.set_index("__idx", drop=False)
 
     for _, r in f.iterrows():
         fi = int(r["__idx"])
-        if fi in fin_match:
+        if fi in fin_match or pd.isna(r["__amount"]) or pd.isna(r["__date"]):
             continue
         amt = round(float(r["__amount"]), 2)
         if amt not in amt_to_led:
@@ -239,19 +238,20 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
             if li in ledger_used:
                 continue
             ldate = l_by_idx.loc[li, "__date"]
-            if pd.isna(fdate) or pd.isna(ldate):
+            if pd.isna(ldate):
                 continue
-            if abs((pd.to_datetime(fdate) - pd.to_datetime(ldate)).days) <= date_tol_days:
+            if abs((pd.to_datetime(fdate) - pd.to_datetime(ldate)).days) <= int(date_tol_days):
                 cands.append(li)
         if cands:
             try_match(fi, cands)
 
-    # Outputs with status
+    # Outputs
     f_out = fin_df.copy()
+    l_out = led_df.copy()
+
     f_out["CONCILIADO?"] = f["__idx"].map(lambda x: "S" if int(x) in fin_match else "N")
     f_out["PAREADO_COM_IDX_CONTABIL"] = f["__idx"].map(lambda x: fin_match.get(int(x), ""))
 
-    l_out = led_df.copy()
     l_out["CONCILIADO?"] = l["__idx"].map(lambda x: "S" if int(x) in led_match else "N")
     l_out["PAREADO_COM_IDX_FINANCEIRO"] = l["__idx"].map(lambda x: led_match.get(int(x), ""))
 
@@ -261,58 +261,41 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     fin_only = f[~f["__idx"].astype(int).isin(fin_match.keys())].copy()
     led_only = l[~l["__idx"].astype(int).isin(led_match.keys())].copy()
 
-    # Divergências HUMANIZADAS
-    def build_div_fin(fin_only_norm):
-        rows = []
-        fin_by_idx = fin_df.reset_index(drop=True)
+    # Divergências humanizadas
+    fin_rows = []
+    fin_reset = fin_df.reset_index(drop=True)
+    for _, r in fin_only.iterrows():
+        i = int(r["__idx"])
+        base = fin_reset.iloc[i] if 0 <= i < len(fin_reset) else pd.Series(dtype="object")
+        fin_rows.append({
+            "ORIGEM": "Somente Financeiro",
+            "DATA": r["__date"],
+            "DOCUMENTO": str(base.get(cfg.get("fin_documento"), "")) if cfg.get("fin_documento") else "",
+            "PREFIXO/TITULO": str(base.get(cfg.get("fin_prefixo"), "")) if cfg.get("fin_prefixo") else "",
+            "HISTORICO/OPERACAO": str(base.get(cfg.get("fin_operacao"), "")) if cfg.get("fin_operacao") else str(r["__text"]),
+            "CHAVE_DOC": r["__doc_key"],
+            "VALOR": round(float(r["__amount"]), 2) if pd.notna(r["__amount"]) else np.nan,
+            "SALDO_NA_LINHA": round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan,
+        })
 
-        for _, r in fin_only_norm.iterrows():
-            i = int(r["__idx"])
-            base = fin_by_idx.iloc[i] if 0 <= i < len(fin_by_idx) else pd.Series(dtype="object")
+    led_rows = []
+    led_reset = led_df.reset_index(drop=True)
+    for _, r in led_only.iterrows():
+        i = int(r["__idx"])
+        base = led_reset.iloc[i] if 0 <= i < len(led_reset) else pd.Series(dtype="object")
+        led_rows.append({
+            "ORIGEM": "Somente Contábil",
+            "DATA": r["__date"],
+            "DOCUMENTO": str(base.get(cfg.get("led_doc"), "")) if cfg.get("led_doc") else "",
+            "CONTA": str(base.get(cfg.get("led_conta"), "")) if cfg.get("led_conta") else "",
+            "HISTORICO/OPERACAO": str(base.get(cfg.get("led_historico"), "")) if cfg.get("led_historico") else str(r["__text"]),
+            "CHAVE_DOC": r["__doc_key"],
+            "VALOR": round(float(r["__amount"]), 2) if pd.notna(r["__amount"]) else np.nan,
+            "SALDO_NA_LINHA": round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan,
+        })
 
-            rows.append(
-                {
-                    "ORIGEM": "Somente Financeiro",
-                    "DATA": r["__date"],
-                    "DOCUMENTO": (str(base.get(cfg.get("fin_documento"), "")) if cfg.get("fin_documento") else ""),
-                    "PREFIXO/TITULO": (str(base.get(cfg.get("fin_prefixo"), "")) if cfg.get("fin_prefixo") else ""),
-                    "OPERACAO/HISTORICO": (
-                        str(base.get(cfg.get("fin_operacao"), "")) if cfg.get("fin_operacao") else str(r["__text"]).strip()
-                    ),
-                    "CHAVE_DOC": r["__doc_key"],
-                    "VALOR": round(float(r["__amount"]), 2),
-                    "SALDO_NA_LINHA": (round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan),
-                }
-            )
-        return pd.DataFrame(rows)
+    div = pd.concat([pd.DataFrame(fin_rows), pd.DataFrame(led_rows)], ignore_index=True)
 
-    def build_div_led(led_only_norm):
-        rows = []
-        led_by_idx = led_df.reset_index(drop=True)
-
-        for _, r in led_only_norm.iterrows():
-            i = int(r["__idx"])
-            base = led_by_idx.iloc[i] if 0 <= i < len(led_by_idx) else pd.Series(dtype="object")
-
-            rows.append(
-                {
-                    "ORIGEM": "Somente Contábil",
-                    "DATA": r["__date"],
-                    "LOTE/SUB/DOC/LINHA": (str(base.get(cfg.get("led_doc"), "")) if cfg.get("led_doc") else ""),
-                    "CONTA": (str(base.get(cfg.get("led_conta"), "")) if cfg.get("led_conta") else ""),
-                    "HISTORICO": (
-                        str(base.get(cfg.get("led_historico"), "")) if cfg.get("led_historico") else str(r["__text"]).strip()
-                    ),
-                    "CHAVE_DOC": r["__doc_key"],
-                    "VALOR": round(float(r["__amount"]), 2),
-                    "SALDO_NA_LINHA": (round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan),
-                }
-            )
-        return pd.DataFrame(rows)
-
-    div = pd.concat([build_div_fin(fin_only), build_div_led(led_only)], ignore_index=True)
-
-    # Summary numbers (ponte)
     fin_unmatched = round(float(fin_only["__amount"].sum()), 2) if not fin_only.empty else 0.0
     led_unmatched = round(float(led_only["__amount"].sum()), 2) if not led_only.empty else 0.0
 
@@ -321,11 +304,7 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     saldo_fin = compute_saldo_final(f)
     saldo_led = compute_saldo_final(l)
 
-    diff_saldo_ant = (
-        np.nan
-        if (pd.isna(saldo_ant_fin) or pd.isna(saldo_ant_led))
-        else round(saldo_ant_fin - saldo_ant_led, 2)
-    )
+    diff_saldo_ant = np.nan if (pd.isna(saldo_ant_fin) or pd.isna(saldo_ant_led)) else round(saldo_ant_fin - saldo_ant_led, 2)
     diff_final = np.nan if (pd.isna(saldo_fin) or pd.isna(saldo_led)) else round(saldo_fin - saldo_led, 2)
 
     impacto = round(fin_unmatched - led_unmatched, 2)
@@ -335,25 +314,22 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     resumo = {
         "Saldo anterior (antes do 1º movimento) - Financeiro": saldo_ant_fin,
         "Saldo anterior (antes do 1º movimento) - Contábil": saldo_ant_led,
-        "Diferença de saldo anterior (Fin - Cont)": diff_saldo_ant,
+        "Diferença saldo anterior (Fin - Cont)": diff_saldo_ant,
         "Saldo final (último movimento) - Financeiro": saldo_fin,
         "Saldo final (último movimento) - Contábil": saldo_led,
         "Diferença final (Fin - Cont)": diff_final,
-        "Soma pendente Somente Financeiro (Divergências)": fin_unmatched,
-        "Soma pendente Somente Contábil (Divergências)": led_unmatched,
-        "Impacto líquido pendentes (Fin - Cont)": impacto,
+        "Soma pendente Somente Financeiro": fin_unmatched,
+        "Soma pendente Somente Contábil": led_unmatched,
+        "Impacto pendentes (Fin - Cont)": impacto,
         "Diferença esperada (Dif. saldo anterior + Impacto)": diff_esperada,
-        "Conferência (Dif. final - Dif. esperada) → precisa zerar": conferencia,
+        "Conferência (ideal 0,00)": conferencia,
     }
 
-    # Stats for painel
     stats = {
         "fin_total_linhas": int(len(f)),
         "led_total_linhas": int(len(l)),
         "fin_conciliadas": int(len(fin_match)),
-        "led_conciliadas": int(len(led_match)),
         "fin_pendentes": int(len(f) - len(fin_match)),
-        "led_pendentes": int(len(l) - len(led_match)),
         "fin_pendente_valor": float(fin_unmatched),
         "led_pendente_valor": float(led_unmatched),
         "impacto": float(impacto),
@@ -362,192 +338,87 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
 
     return f_out, l_out, div, resumo, stats
 
+
+def build_pendencias_tratativa(div):
+    if div is None or div.empty:
+        return pd.DataFrame(columns=[
+            "ORIGEM", "DATA", "IDENTIFICADOR", "HISTORICO/OPERACAO", "VALOR",
+            "ACAO_SUGERIDA", "RESPONSAVEL", "PRAZO", "STATUS", "OBS"
+        ])
+
+    def ident(row):
+        parts = []
+        if "DOCUMENTO" in row and pd.notna(row["DOCUMENTO"]) and str(row["DOCUMENTO"]).strip():
+            parts.append(f"DOC:{row['DOCUMENTO']}")
+        if "PREFIXO/TITULO" in row and pd.notna(row["PREFIXO/TITULO"]) and str(row["PREFIXO/TITULO"]).strip():
+            parts.append(f"PRE:{row['PREFIXO/TITULO']}")
+        if "CONTA" in row and pd.notna(row["CONTA"]) and str(row["CONTA"]).strip():
+            parts.append(f"CTA:{row['CONTA']}")
+        return " | ".join(parts)[:120]
+
+    trat = pd.DataFrame({
+        "ORIGEM": div.get("ORIGEM", ""),
+        "DATA": div.get("DATA", ""),
+        "IDENTIFICADOR": div.apply(ident, axis=1),
+        "HISTORICO/OPERACAO": div.get("HISTORICO/OPERACAO", ""),
+        "VALOR": div.get("VALOR", ""),
+        "ACAO_SUGERIDA": "",
+        "RESPONSAVEL": "",
+        "PRAZO": "",
+        "STATUS": "Pendente",
+        "OBS": "",
+    })
+    return trat
+
+
 def build_excel(fin_out, led_out, div, resumo, stats):
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        # Abas base
         fin_out.to_excel(writer, index=False, sheet_name="Extrato_Financeiro")
         led_out.to_excel(writer, index=False, sheet_name="Razao_Contabil")
         div.to_excel(writer, index=False, sheet_name="Divergencias")
 
-        # Aba de tratativa (plano de ação)
-        trat_df = pd.DataFrame(columns=[
-            "ORIGEM",
-            "DATA",
-            "IDENTIFICADOR",
-            "HISTORICO/OPERACAO",
-            "VALOR",
-            "ACAO_SUGERIDA",
-            "RESPONSAVEL",
-            "PRAZO",
-            "STATUS",
-            "OBS"
-        ])
-        trat_df.to_excel(writer, index=False, sheet_name="Pendencias_Tratativa")
-
-        # Resumo (formato simples, sem bagunçar)
-        resumo_df = pd.DataFrame(list(resumo.items()), columns=["Métrica", "Valor"])
-        resumo_df.to_excel(writer, index=False, sheet_name="Resumo_Fechamento")
-
-        # Formatações básicas
-        wb = writer.book
-
-        fmt_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1})
-        fmt_money = wb.add_format({"num_format": "#,##0.00", "border": 1})
-
-        # Ajustes gerais (freeze + cabeçalho)
-        for sh in ["Extrato_Financeiro", "Razao_Contabil", "Divergencias", "Pendencias_Tratativa", "Resumo_Fechamento"]:
-            ws = writer.sheets[sh]
-            ws.freeze_panes(1, 0)
-            ws.set_row(0, 20, fmt_hdr)
-
-        # Larguras (tratativa e resumo)
-        ws_t = writer.sheets["Pendencias_Tratativa"]
-        ws_t.autofilter(0, 0, 0, len(trat_df.columns) - 1)
-        ws_t.set_column(0, 0, 18)     # ORIGEM
-        ws_t.set_column(1, 1, 12)     # DATA
-        ws_t.set_column(2, 2, 28)     # IDENTIFICADOR
-        ws_t.set_column(3, 3, 50)     # HISTORICO/OPERACAO
-        ws_t.set_column(4, 4, 16, fmt_money)  # VALOR
-        ws_t.set_column(5, 5, 34)     # ACAO_SUGERIDA
-        ws_t.set_column(6, 6, 18)     # RESPONSAVEL
-        ws_t.set_column(7, 7, 12)     # PRAZO
-        ws_t.set_column(8, 8, 14)     # STATUS
-        ws_t.set_column(9, 9, 40)     # OBS
-
-        ws_r = writer.sheets["Resumo_Fechamento"]
-        ws_r.set_column(0, 0, 68)
-        ws_r.set_column(1, 1, 20, fmt_money)
-
-    output.seek(0)
-    return output      
-
-        # Resumo em formato formulário
         resumo_df = pd.DataFrame(
             [
-                ["Saldo anterior (antes do 1º movimento) - Financeiro", resumo["Saldo anterior (antes do 1º movimento) - Financeiro"]],
-                ["Saldo anterior (antes do 1º movimento) - Contábil", resumo["Saldo anterior (antes do 1º movimento) - Contábil"]],
-                ["Diferença de saldo anterior (Fin - Cont)", resumo["Diferença de saldo anterior (Fin - Cont)"]],
-                ["", ""],
-                ["Saldo final (último movimento) - Financeiro", resumo["Saldo final (último movimento) - Financeiro"]],
-                ["Saldo final (último movimento) - Contábil", resumo["Saldo final (último movimento) - Contábil"]],
+                ["Diferença saldo anterior (Fin - Cont)", resumo["Diferença saldo anterior (Fin - Cont)"]],
+                ["Impacto pendentes (Fin - Cont)", resumo["Impacto pendentes (Fin - Cont)"]],
                 ["Diferença final (Fin - Cont)", resumo["Diferença final (Fin - Cont)"]],
-                ["", ""],
-                ["Soma pendente Somente Financeiro (Divergências)", resumo["Soma pendente Somente Financeiro (Divergências)"]],
-                ["Soma pendente Somente Contábil (Divergências)", resumo["Soma pendente Somente Contábil (Divergências)"]],
-                ["Impacto líquido pendentes (Fin - Cont)", resumo["Impacto líquido pendentes (Fin - Cont)"]],
-                ["Diferença esperada (Dif. saldo anterior + Impacto)", resumo["Diferença esperada (Dif. saldo anterior + Impacto)"]],
-                ["Conferência (Dif. final - Dif. esperada) → precisa zerar", resumo["Conferência (Dif. final - Dif. esperada) → precisa zerar"]],
+                ["Conferência (ideal 0,00)", resumo["Conferência (ideal 0,00)"]],
             ],
             columns=["Métrica", "Valor"],
         )
         resumo_df.to_excel(writer, index=False, sheet_name="Resumo_Fechamento")
 
-        # Aba Painel (KPIs)
-        painel_df = pd.DataFrame(
-            [
-                ["Linhas Financeiro", stats["fin_total_linhas"]],
-                ["Linhas Contábil", stats["led_total_linhas"]],
-                ["Conciliadas Financeiro", stats["fin_conciliadas"]],
-                ["Conciliadas Contábil", stats["led_conciliadas"]],
-                ["Pendentes Financeiro", stats["fin_pendentes"]],
-                ["Pendentes Contábil", stats["led_pendentes"]],
-                ["Pendente Financeiro (valor)", stats["fin_pendente_valor"]],
-                ["Pendente Contábil (valor)", stats["led_pendente_valor"]],
-                ["Impacto pendentes (Fin-Cont)", stats["impacto"]],
-                ["Conferência (ideal 0,00)", stats["conferencia"]],
-            ],
-            columns=["Indicador", "Valor"],
-        )
-        painel_df.to_excel(writer, index=False, sheet_name="Painel")
+        trat_df = build_pendencias_tratativa(div)
+        trat_df.to_excel(writer, index=False, sheet_name="Pendencias_Tratativa")
 
+        # --- Formatação básica
         wb = writer.book
         fmt_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1})
-        fmt_txt = wb.add_format({"border": 1})
         fmt_money = wb.add_format({"num_format": "#,##0.00", "border": 1})
-        fmt_title = wb.add_format({"bold": True, "font_size": 14})
-        fmt_block = wb.add_format({"border": 1, "bold": True})
-        fmt_ok = wb.add_format({"border": 1, "bold": True})
-        fmt_bad = wb.add_format({"border": 1, "bold": True})
-        fmt_warn = wb.add_format({"border": 1, "bold": True})
 
-        # Ajustes gerais nas abas
-        for sh in ["Extrato_Financeiro", "Razao_Contabil", "Divergencias"]:
+        for sh in ["Extrato_Financeiro", "Razao_Contabil", "Divergencias", "Resumo_Fechamento", "Pendencias_Tratativa"]:
             ws = writer.sheets[sh]
             ws.freeze_panes(1, 0)
-            ws.autofilter(0, 0, 0, max(0, (len({"Extrato_Financeiro": fin_out, "Razao_Contabil": led_out, "Divergencias": div}[sh].columns) - 1)))
             ws.set_row(0, 20, fmt_hdr)
-            ws.set_column(0, 0, 14)
-            ws.set_column(1, 6, 26)
-            ws.set_column(7, 50, 18)
 
-        # Formatação de STATUS com destaque
-        def apply_status_format(ws, df):
-            if "STATUS" not in df.columns:
-                return
-            col = df.columns.get_loc("STATUS")
-            last_row = len(df)
-            ws.conditional_format(1, col, last_row, col, {"type": "text", "criteria": "containing", "value": "Conciliado", "format": wb.add_format({"bold": True})})
-            ws.conditional_format(1, col, last_row, col, {"type": "text", "criteria": "containing", "value": "Pendente", "format": wb.add_format({"bold": True})})
+        # Larguras
+        writer.sheets["Resumo_Fechamento"].set_column(0, 0, 42)
+        writer.sheets["Resumo_Fechamento"].set_column(1, 1, 22, fmt_money)
 
-        apply_status_format(writer.sheets["Extrato_Financeiro"], fin_out)
-        apply_status_format(writer.sheets["Razao_Contabil"], led_out)
-
-        # Resumo_Fechamento estilo formulário
-        ws_r = writer.sheets["Resumo_Fechamento"]
-        ws_r.freeze_panes(1, 0)
-        ws_r.set_row(0, 20, fmt_hdr)
-        ws_r.set_column(0, 0, 68)
-        ws_r.set_column(1, 1, 20, fmt_money)
-
-        # Destacar conferência (linha onde contém "Conferência")
-        conf_row = None
-        for i, v in enumerate(resumo_df["Métrica"].tolist(), start=1):
-            if isinstance(v, str) and v.strip().lower().startswith("conferência"):
-                conf_row = i
-                break
-
-        if conf_row is not None:
-            # valor em B(conf_row)
-            conf_val = resumo_df.iloc[conf_row - 1, 1]
-            if pd.isna(conf_val):
-                ws_r.write(conf_row, 1, conf_val, fmt_warn)
-            else:
-                if abs(float(conf_val)) < 0.005:
-                    ws_r.write(conf_row, 1, conf_val, wb.add_format({"num_format": "#,##0.00", "border": 2, "bold": True}))
-                else:
-                    ws_r.write(conf_row, 1, conf_val, wb.add_format({"num_format": "#,##0.00", "border": 2, "bold": True}))
-
-        # Painel com gráfico
-        ws_p = writer.sheets["Painel"]
-        ws_p.freeze_panes(1, 0)
-        ws_p.set_row(0, 20, fmt_hdr)
-        ws_p.set_column(0, 0, 34)
-        ws_p.set_column(1, 1, 20, fmt_money)
-
-        ws_p.write(0, 3, "Painel ConciliaMais", fmt_title)
-
-        # Tabela para gráfico (contagem)
-        ws_p.write(12, 0, "Categoria", fmt_hdr)
-        ws_p.write(12, 1, "Qtd", fmt_hdr)
-        ws_p.write(13, 0, "Conciliado", fmt_txt)
-        ws_p.write(13, 1, stats["fin_conciliadas"], fmt_txt)
-        ws_p.write(14, 0, "Pendente", fmt_txt)
-        ws_p.write(14, 1, stats["fin_pendentes"], fmt_txt)
-
-        chart = wb.add_chart({"type": "column"})
-        chart.add_series(
-            {
-                "name": "Financeiro",
-                "categories": ["Painel", 13, 0, 14, 0],
-                "values": ["Painel", 13, 1, 14, 1],
-            }
-        )
-        chart.set_title({"name": "Match vs Pendente (Financeiro)"})
-        chart.set_legend({"none": True})
-        chart.set_size({"width": 520, "height": 280})
-        ws_p.insert_chart(2, 3, chart)
+        ws_t = writer.sheets["Pendencias_Tratativa"]
+        ws_t.autofilter(0, 0, 0, len(trat_df.columns) - 1)
+        ws_t.set_column(0, 0, 18)
+        ws_t.set_column(1, 1, 12)
+        ws_t.set_column(2, 2, 34)
+        ws_t.set_column(3, 3, 60)
+        ws_t.set_column(4, 4, 16, fmt_money)
+        ws_t.set_column(5, 5, 34)
+        ws_t.set_column(6, 6, 18)
+        ws_t.set_column(7, 7, 12)
+        ws_t.set_column(8, 8, 14)
+        ws_t.set_column(9, 9, 40)
 
     output.seek(0)
     return output
@@ -580,17 +451,18 @@ if fin_file and led_file:
     fin_df = read_table(fin_file)
     led_df = read_table(led_file)
 
-    st.subheader("Mapeamento de colunas (auto-detectado — ajuste se precisar)")
     fin_guess = auto_detect_financial(fin_df)
     led_guess = auto_detect_ledger(led_df)
 
+    st.subheader("Mapeamento de colunas (auto-detectado — ajuste se precisar)")
     colA, colB = st.columns(2)
 
     with colA:
         st.markdown("### Extrato Financeiro")
-        fin_date = st.selectbox("Coluna de Data", fin_df.columns, index=fin_df.columns.get_loc(fin_guess["date"]) if fin_guess["date"] in fin_df.columns else 0)
+        fin_date = st.selectbox("Coluna de Data", fin_df.columns,
+                                index=fin_df.columns.get_loc(fin_guess["date"]) if fin_guess["date"] in fin_df.columns else 0)
         fin_operacao = st.selectbox("Coluna de Operação/Histórico", ["(nenhuma)"] + list(fin_df.columns),
-                                   index=(["(nenhuma)"] + list(fin_df.columns)).index(fin_guess["operacao"]) if fin_guess["operacao"] in fin_df.columns else 0)
+                                    index=(["(nenhuma)"] + list(fin_df.columns)).index(fin_guess["operacao"]) if fin_guess["operacao"] in fin_df.columns else 0)
         fin_documento = st.selectbox("Coluna de Documento", ["(nenhuma)"] + list(fin_df.columns),
                                      index=(["(nenhuma)"] + list(fin_df.columns)).index(fin_guess["documento"]) if fin_guess["documento"] in fin_df.columns else 0)
         fin_prefixo = st.selectbox("Coluna de Prefixo/Título", ["(nenhuma)"] + list(fin_df.columns),
@@ -606,7 +478,8 @@ if fin_file and led_file:
 
     with colB:
         st.markdown("### Razão Contábil")
-        led_date = st.selectbox("Coluna de Data", led_df.columns, index=led_df.columns.get_loc(led_guess["date"]) if led_guess["date"] in led_df.columns else 0, key="led_date")
+        led_date = st.selectbox("Coluna de Data", led_df.columns,
+                                index=led_df.columns.get_loc(led_guess["date"]) if led_guess["date"] in led_df.columns else 0, key="led_date")
         led_historico = st.selectbox("Coluna de Histórico", ["(nenhuma)"] + list(led_df.columns),
                                      index=(["(nenhuma)"] + list(led_df.columns)).index(led_guess["historico"]) if led_guess["historico"] in led_df.columns else 0, key="led_hist")
         led_doc = st.selectbox("Coluna de Documento/Lote (opcional)", ["(nenhuma)"] + list(led_df.columns),
@@ -621,14 +494,6 @@ if fin_file and led_file:
                                   index=(["(usar Débito - Crédito)"] + list(led_df.columns)).index(led_guess["valor"]) if led_guess["valor"] in led_df.columns else 0, key="led_amount")
         led_saldo = st.selectbox("Coluna de Saldo (opcional)", ["(nenhuma)"] + list(led_df.columns),
                                  index=(["(nenhuma)"] + list(led_df.columns)).index(led_guess["saldo"]) if led_guess["saldo"] in led_df.columns else 0, key="led_saldo")
-
-    st.divider()
-    st.subheader("Parâmetros de conciliação")
-    p1, p2 = st.columns([1, 2])
-    with p1:
-        date_tol = st.number_input("Tolerância de dias (0 = mesma data)", min_value=0, max_value=10, value=0, step=1)
-    with p2:
-        st.caption("Matching: (1) Valor + DocKey, (2) Valor + Data (com tolerância). DocKey = sequência numérica (>=6 dígitos) do texto.")
 
     cfg = {
         "fin_date": fin_date,
@@ -649,27 +514,25 @@ if fin_file and led_file:
         "led_saldo": None if led_saldo == "(nenhuma)" else led_saldo,
     }
 
-    # Pre-check: saldo anterior mismatch warning
+    st.divider()
+    st.subheader("Alertas iniciais (Saldo Anterior)")
     f_norm, l_norm = build_normalized(fin_df, led_df, cfg)
     saldo_ant_fin = compute_saldo_anterior(f_norm)
     saldo_ant_led = compute_saldo_anterior(l_norm)
-    diff_ant = (
-        np.nan if (pd.isna(saldo_ant_fin) or pd.isna(saldo_ant_led)) else round(saldo_ant_fin - saldo_ant_led, 2)
-    )
+    diff_ant = np.nan if (pd.isna(saldo_ant_fin) or pd.isna(saldo_ant_led)) else round(saldo_ant_fin - saldo_ant_led, 2)
 
-    st.divider()
-    st.subheader("Alertas iniciais")
+    proceed_ok = True
     if pd.isna(diff_ant):
-        st.info("Saldo anterior: não foi possível calcular automaticamente (verifique se selecionou a coluna de Saldo).")
-        proceed_ok = True
+        st.info("Não foi possível calcular o saldo anterior automaticamente (verifique se selecionou a coluna de SALDO).")
     else:
         if abs(diff_ant) > 0.009:
-            st.warning(f"Saldo anterior não bate (Fin - Cont = {fmt(diff_ant)}). Isso indica diferença em períodos anteriores.")
+            st.warning(f"Saldo anterior não bate (Fin - Cont = {fmt(diff_ant)}). Diferença pode estar em períodos anteriores.")
             proceed_ok = st.checkbox("Prosseguir mesmo assim", value=False)
         else:
             st.success("Saldo anterior bate (OK).")
-            proceed_ok = True
 
+    st.divider()
+    date_tol = st.number_input("Tolerância de dias (0 = mesma data)", min_value=0, max_value=10, value=0, step=1)
     run = st.button("Rodar conciliação agora", type="primary", disabled=not proceed_ok)
 
     if run:
@@ -691,20 +554,24 @@ if fin_file and led_file:
             st.markdown("**Pendências (valor)**")
             st.bar_chart(pd.DataFrame({"valor": [stats["fin_pendente_valor"], stats["led_pendente_valor"]]}, index=["Somente Financeiro", "Somente Contábil"]))
 
-        st.subheader("Resumo de fechamento (precisa zerar)")
-        ponte_tbl = pd.DataFrame(
+        st.subheader("Resumo de fechamento")
+        resumo_tbl = pd.DataFrame(
             [
-                ["Saldo anterior (Fin - Cont)", resumo["Diferença de saldo anterior (Fin - Cont)"]],
-                ["Impacto pendentes (Fin - Cont)", resumo["Impacto líquido pendentes (Fin - Cont)"]],
+                ["Diferença saldo anterior (Fin - Cont)", resumo["Diferença saldo anterior (Fin - Cont)"]],
+                ["Impacto pendentes (Fin - Cont)", resumo["Impacto pendentes (Fin - Cont)"]],
                 ["Diferença final (Fin - Cont)", resumo["Diferença final (Fin - Cont)"]],
-                ["Conferência (ideal 0,00)", resumo["Conferência (Dif. final - Dif. esperada) → precisa zerar"]],
+                ["Conferência (ideal 0,00)", resumo["Conferência (ideal 0,00)"]],
             ],
             columns=["Métrica", "Valor"],
         )
-        st.dataframe(ponte_tbl, use_container_width=True, height=170)
+        st.dataframe(resumo_tbl, use_container_width=True, height=170)
 
         st.subheader("Divergências (itens não pareados)")
-        st.dataframe(div, use_container_width=True, height=360)
+        st.dataframe(div, use_container_width=True, height=340)
+
+        st.subheader("Pendências para tratativa (pré-preenchidas)")
+        trat_df = build_pendencias_tratativa(div)
+        st.dataframe(trat_df, use_container_width=True, height=260)
 
         excel_bytes = build_excel(fin_out, led_out, div, resumo, stats)
         st.download_button(
