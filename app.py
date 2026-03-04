@@ -7,6 +7,7 @@ from datetime import datetime
 
 st.set_page_config(page_title="ConciliaMais — Módulo 1 (MVP)", layout="wide")
 
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -18,6 +19,7 @@ def _to_date_series(s):
         out = pd.to_datetime(s, errors="coerce")
     return out.dt.date
 
+
 def extract_doc_key(text):
     if pd.isna(text):
         return ""
@@ -27,6 +29,7 @@ def extract_doc_key(text):
         nums = sorted(nums, key=lambda x: (len(x), t.rfind(x)))
         return nums[-1]
     return ""
+
 
 def normalize_money(x):
     if pd.isna(x):
@@ -43,6 +46,7 @@ def normalize_money(x):
     except Exception:
         return np.nan
 
+
 def read_table(uploaded):
     name = uploaded.name.lower()
     if name.endswith(".csv"):
@@ -55,13 +59,16 @@ def read_table(uploaded):
             best = tmp
     return best
 
+
 def auto_detect_financial(df):
     cols = {c.lower(): c for c in df.columns}
+
     def pick(*cands):
         for c in cands:
             if c in cols:
                 return cols[c]
         return None
+
     return dict(
         date=pick("data", "dt", "data mov", "data_mov"),
         entradas=pick("entradas", "entrada", "credito", "crédito"),
@@ -73,13 +80,16 @@ def auto_detect_financial(df):
         valor=pick("valor", "vlr", "valor mov", "valor_mov"),
     )
 
+
 def auto_detect_ledger(df):
     cols = {c.lower(): c for c in df.columns}
+
     def pick(*cands):
         for c in cands:
             if c in cols:
                 return cols[c]
         return None
+
     return dict(
         date=pick("data", "dt", "data lanc", "data_lanc"),
         debito=pick("debito", "débito", "debit"),
@@ -90,6 +100,7 @@ def auto_detect_ledger(df):
         conta=pick("conta"),
         valor=pick("valor", "vlr"),
     )
+
 
 def build_normalized(fin_df, led_df, cfg):
     # Finance
@@ -111,9 +122,11 @@ def build_normalized(fin_df, led_df, cfg):
     doc_col = cfg.get("fin_documento")
     pre_col = cfg.get("fin_prefixo")
     f["__text"] = (
-        (f[op_col].astype(str) if op_col else "") + " " +
-        (f[doc_col].astype(str) if doc_col else "") + " " +
-        (f[pre_col].astype(str) if pre_col else "")
+        (f[op_col].astype(str) if op_col else "")
+        + " "
+        + (f[doc_col].astype(str) if doc_col else "")
+        + " "
+        + (f[pre_col].astype(str) if pre_col else "")
     )
     f["__doc_key"] = f["__text"].map(extract_doc_key)
     f["__idx"] = np.arange(len(f))
@@ -137,14 +150,17 @@ def build_normalized(fin_df, led_df, cfg):
     doc_col2 = cfg.get("led_doc")
     conta_col = cfg.get("led_conta")
     l["__text"] = (
-        (l[hist_col].astype(str) if hist_col else "") + " " +
-        (l[doc_col2].astype(str) if doc_col2 else "") + " " +
-        (l[conta_col].astype(str) if conta_col else "")
+        (l[hist_col].astype(str) if hist_col else "")
+        + " "
+        + (l[doc_col2].astype(str) if doc_col2 else "")
+        + " "
+        + (l[conta_col].astype(str) if conta_col else "")
     )
     l["__doc_key"] = l["__text"].map(extract_doc_key)
     l["__idx"] = np.arange(len(l))
 
     return f, l
+
 
 def compute_saldo_anterior(df_norm):
     # usa SOMENTE linhas de movimento (DATA preenchida)
@@ -157,6 +173,7 @@ def compute_saldo_anterior(df_norm):
     r = dfv.iloc[0]
     return round(float(r["__saldo"]) - float(r["__amount"]), 2)
 
+
 def compute_saldo_final(df_norm):
     # usa SOMENTE linhas de movimento (DATA preenchida)
     dfv = df_norm.copy()
@@ -167,6 +184,7 @@ def compute_saldo_final(df_norm):
         return np.nan
     r = dfv.iloc[-1]
     return round(float(r["__saldo"]), 2)
+
 
 def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     f, l = build_normalized(fin_df, led_df, cfg)
@@ -188,7 +206,11 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     # Index ledger by (amount, doc_key)
     key_to_led = {}
     for _, r in l.iterrows():
-        key = (round(float(r["__amount"]), 2), r["__doc_key"])
+        try:
+            amt = round(float(r["__amount"]), 2)
+        except Exception:
+            continue
+        key = (amt, r["__doc_key"])
         key_to_led.setdefault(key, []).append(int(r["__idx"]))
 
     # Primary: amount + doc_key
@@ -226,83 +248,89 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
 
     # Outputs with status
     f_out = fin_df.copy()
-    f_out["STATUS"] = f_out["CONCILIADO?"].map(lambda x: "✅ Conciliado" if x == "S" else "❌ Pendente")
+    f_out["CONCILIADO?"] = f["__idx"].map(lambda x: "S" if int(x) in fin_match else "N")
     f_out["PAREADO_COM_IDX_CONTABIL"] = f["__idx"].map(lambda x: fin_match.get(int(x), ""))
 
     l_out = led_df.copy()
-    l_out["STATUS"] = l_out["CONCILIADO?"].map(lambda x: "✅ Conciliado" if x == "S" else "❌ Pendente")
+    l_out["CONCILIADO?"] = l["__idx"].map(lambda x: "S" if int(x) in led_match else "N")
     l_out["PAREADO_COM_IDX_FINANCEIRO"] = l["__idx"].map(lambda x: led_match.get(int(x), ""))
+
+    f_out["STATUS"] = f_out["CONCILIADO?"].map(lambda x: "Conciliado" if x == "S" else "Pendente")
+    l_out["STATUS"] = l_out["CONCILIADO?"].map(lambda x: "Conciliado" if x == "S" else "Pendente")
 
     fin_only = f[~f["__idx"].astype(int).isin(fin_match.keys())].copy()
     led_only = l[~l["__idx"].astype(int).isin(led_match.keys())].copy()
 
-def build_div_fin(fin_only_norm):
-    # Divergências do Financeiro com campos "reconhecíveis"
-    rows = []
-    fin_by_idx = fin_df.reset_index(drop=True)
+    # Divergências HUMANIZADAS
+    def build_div_fin(fin_only_norm):
+        rows = []
+        fin_by_idx = fin_df.reset_index(drop=True)
 
-    for _, r in fin_only_norm.iterrows():
-        i = int(r["__idx"])
-        base = fin_by_idx.iloc[i] if 0 <= i < len(fin_by_idx) else pd.Series(dtype="object")
+        for _, r in fin_only_norm.iterrows():
+            i = int(r["__idx"])
+            base = fin_by_idx.iloc[i] if 0 <= i < len(fin_by_idx) else pd.Series(dtype="object")
 
-        rows.append({
-            "ORIGEM": "Somente Financeiro",
-            "DATA": r["__date"],
-            "DOCUMENTO": (str(base.get(cfg.get("fin_documento"), "")) if cfg.get("fin_documento") else ""),
-            "PREFIXO/TITULO": (str(base.get(cfg.get("fin_prefixo"), "")) if cfg.get("fin_prefixo") else ""),
-            "OPERACAO/HISTORICO": (str(base.get(cfg.get("fin_operacao"), "")) if cfg.get("fin_operacao") else str(r["__text"]).strip()),
-            "CHAVE_DOC": r["__doc_key"],
-            "VALOR": round(float(r["__amount"]), 2),
-            "SALDO_NA_LINHA": (round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan),
-        })
-    return pd.DataFrame(rows)
+            rows.append(
+                {
+                    "ORIGEM": "Somente Financeiro",
+                    "DATA": r["__date"],
+                    "DOCUMENTO": (str(base.get(cfg.get("fin_documento"), "")) if cfg.get("fin_documento") else ""),
+                    "PREFIXO/TITULO": (str(base.get(cfg.get("fin_prefixo"), "")) if cfg.get("fin_prefixo") else ""),
+                    "OPERACAO/HISTORICO": (
+                        str(base.get(cfg.get("fin_operacao"), "")) if cfg.get("fin_operacao") else str(r["__text"]).strip()
+                    ),
+                    "CHAVE_DOC": r["__doc_key"],
+                    "VALOR": round(float(r["__amount"]), 2),
+                    "SALDO_NA_LINHA": (round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan),
+                }
+            )
+        return pd.DataFrame(rows)
 
-def build_div_led(led_only_norm):
-    # Divergências do Contábil com campos "reconhecíveis"
-    rows = []
-    led_by_idx = led_df.reset_index(drop=True)
+    def build_div_led(led_only_norm):
+        rows = []
+        led_by_idx = led_df.reset_index(drop=True)
 
-    for _, r in led_only_norm.iterrows():
-        i = int(r["__idx"])
-        base = led_by_idx.iloc[i] if 0 <= i < len(led_by_idx) else pd.Series(dtype="object")
+        for _, r in led_only_norm.iterrows():
+            i = int(r["__idx"])
+            base = led_by_idx.iloc[i] if 0 <= i < len(led_by_idx) else pd.Series(dtype="object")
 
-        rows.append({
-            "ORIGEM": "Somente Contábil",
-            "DATA": r["__date"],
-            "LOTE/SUB/DOC/LINHA": (str(base.get(cfg.get("led_doc"), "")) if cfg.get("led_doc") else ""),
-            "CONTA": (str(base.get(cfg.get("led_conta"), "")) if cfg.get("led_conta") else ""),
-            "HISTORICO": (str(base.get(cfg.get("led_historico"), "")) if cfg.get("led_historico") else str(r["__text"]).strip()),
-            "CHAVE_DOC": r["__doc_key"],
-            "VALOR": round(float(r["__amount"]), 2),
-            "SALDO_NA_LINHA": (round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan),
-        })
-    return pd.DataFrame(rows)
+            rows.append(
+                {
+                    "ORIGEM": "Somente Contábil",
+                    "DATA": r["__date"],
+                    "LOTE/SUB/DOC/LINHA": (str(base.get(cfg.get("led_doc"), "")) if cfg.get("led_doc") else ""),
+                    "CONTA": (str(base.get(cfg.get("led_conta"), "")) if cfg.get("led_conta") else ""),
+                    "HISTORICO": (
+                        str(base.get(cfg.get("led_historico"), "")) if cfg.get("led_historico") else str(r["__text"]).strip()
+                    ),
+                    "CHAVE_DOC": r["__doc_key"],
+                    "VALOR": round(float(r["__amount"]), 2),
+                    "SALDO_NA_LINHA": (round(float(r["__saldo"]), 2) if pd.notna(r["__saldo"]) else np.nan),
+                }
+            )
+        return pd.DataFrame(rows)
 
-div = pd.concat(
-    [
-        build_div_fin(fin_only),
-        build_div_led(led_only),
-    ],
-    ignore_index=True
-)
+    div = pd.concat([build_div_fin(fin_only), build_div_led(led_only)], ignore_index=True)
 
-    # Summary numbers
-    fin_total = round(float(f["__amount"].sum()), 2)
-    led_total = round(float(l["__amount"].sum()), 2)
-    fin_unmatched = round(float(fin_only["__amount"].sum()), 2)
-    led_unmatched = round(float(led_only["__amount"].sum()), 2)
+    # Summary numbers (ponte)
+    fin_unmatched = round(float(fin_only["__amount"].sum()), 2) if not fin_only.empty else 0.0
+    led_unmatched = round(float(led_only["__amount"].sum()), 2) if not led_only.empty else 0.0
 
     saldo_ant_fin = compute_saldo_anterior(f)
     saldo_ant_led = compute_saldo_anterior(l)
     saldo_fin = compute_saldo_final(f)
     saldo_led = compute_saldo_final(l)
 
-    diff_saldo_ant = (np.nan if (pd.isna(saldo_ant_fin) or pd.isna(saldo_ant_led)) else round(saldo_ant_fin - saldo_ant_led, 2))
-    diff_final = (np.nan if (pd.isna(saldo_fin) or pd.isna(saldo_led)) else round(saldo_fin - saldo_led, 2))
+    diff_saldo_ant = (
+        np.nan
+        if (pd.isna(saldo_ant_fin) or pd.isna(saldo_ant_led))
+        else round(saldo_ant_fin - saldo_ant_led, 2)
+    )
+    diff_final = np.nan if (pd.isna(saldo_fin) or pd.isna(saldo_led)) else round(saldo_fin - saldo_led, 2)
 
     impacto = round(fin_unmatched - led_unmatched, 2)
-    diff_esperada = (np.nan if pd.isna(diff_saldo_ant) else round(diff_saldo_ant + impacto, 2))
-    conferencia = (np.nan if (pd.isna(diff_final) or pd.isna(diff_esperada)) else round(diff_final - diff_esperada, 2))
+    diff_esperada = np.nan if pd.isna(diff_saldo_ant) else round(diff_saldo_ant + impacto, 2)
+    conferencia = np.nan if (pd.isna(diff_final) or pd.isna(diff_esperada)) else round(diff_final - diff_esperada, 2)
 
     resumo = {
         "Saldo anterior (antes do 1º movimento) - Financeiro": saldo_ant_fin,
@@ -316,40 +344,193 @@ div = pd.concat(
         "Impacto líquido pendentes (Fin - Cont)": impacto,
         "Diferença esperada (Dif. saldo anterior + Impacto)": diff_esperada,
         "Conferência (Dif. final - Dif. esperada) → precisa zerar": conferencia,
-
     }
 
-    return f_out, l_out, div, resumo
+    # Stats for painel
+    stats = {
+        "fin_total_linhas": int(len(f)),
+        "led_total_linhas": int(len(l)),
+        "fin_conciliadas": int(len(fin_match)),
+        "led_conciliadas": int(len(led_match)),
+        "fin_pendentes": int(len(f) - len(fin_match)),
+        "led_pendentes": int(len(l) - len(led_match)),
+        "fin_pendente_valor": float(fin_unmatched),
+        "led_pendente_valor": float(led_unmatched),
+        "impacto": float(impacto),
+        "conferencia": float(conferencia) if pd.notna(conferencia) else np.nan,
+    }
 
-def build_excel(fin_out, led_out, div, resumo):
+    return f_out, l_out, div, resumo, stats
+
+
+def build_excel(fin_out, led_out, div, resumo, stats):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         fin_out.to_excel(writer, index=False, sheet_name="Extrato_Financeiro")
         led_out.to_excel(writer, index=False, sheet_name="Razao_Contabil")
         div.to_excel(writer, index=False, sheet_name="Divergencias")
-        pd.DataFrame(list(resumo.items()), columns=["Metrica", "Valor"]).to_excel(
-            writer, index=False, sheet_name="Resumo_Fechamento"
+        
+# Aba de tratativa (plano de ação)
+trat_df = pd.DataFrame(columns=[
+    "ORIGEM",
+    "DATA",
+    "IDENTIFICADOR",
+    "HISTORICO/OPERACAO",
+    "VALOR",
+    "ACAO_SUGERIDA",
+    "RESPONSAVEL",
+    "PRAZO",
+    "STATUS",
+    "OBS"
+])
+
+trat_df.to_excel(writer, index=False, sheet_name="Pendencias_Tratativa")
+
+ws_t = writer.sheets["Pendencias_Tratativa"]
+ws_t.freeze_panes(1, 0)
+ws_t.autofilter(0, 0, 0, len(trat_df.columns) - 1)
+ws_t.set_row(0, 20, fmt_hdr)
+ws_t.set_column(0, 0, 18)
+ws_t.set_column(1, 1, 12)
+ws_t.set_column(2, 2, 28)
+ws_t.set_column(3, 3, 50)
+ws_t.set_column(4, 4, 16, fmt_money)
+ws_t.set_column(5, 5, 34)
+ws_t.set_column(6, 6, 18)
+ws_t.set_column(7, 7, 12)
+ws_t.set_column(8, 8, 14)
+ws_t.set_column(9, 9, 40)
+        
+
+        # Resumo em formato formulário
+        resumo_df = pd.DataFrame(
+            [
+                ["Saldo anterior (antes do 1º movimento) - Financeiro", resumo["Saldo anterior (antes do 1º movimento) - Financeiro"]],
+                ["Saldo anterior (antes do 1º movimento) - Contábil", resumo["Saldo anterior (antes do 1º movimento) - Contábil"]],
+                ["Diferença de saldo anterior (Fin - Cont)", resumo["Diferença de saldo anterior (Fin - Cont)"]],
+                ["", ""],
+                ["Saldo final (último movimento) - Financeiro", resumo["Saldo final (último movimento) - Financeiro"]],
+                ["Saldo final (último movimento) - Contábil", resumo["Saldo final (último movimento) - Contábil"]],
+                ["Diferença final (Fin - Cont)", resumo["Diferença final (Fin - Cont)"]],
+                ["", ""],
+                ["Soma pendente Somente Financeiro (Divergências)", resumo["Soma pendente Somente Financeiro (Divergências)"]],
+                ["Soma pendente Somente Contábil (Divergências)", resumo["Soma pendente Somente Contábil (Divergências)"]],
+                ["Impacto líquido pendentes (Fin - Cont)", resumo["Impacto líquido pendentes (Fin - Cont)"]],
+                ["Diferença esperada (Dif. saldo anterior + Impacto)", resumo["Diferença esperada (Dif. saldo anterior + Impacto)"]],
+                ["Conferência (Dif. final - Dif. esperada) → precisa zerar", resumo["Conferência (Dif. final - Dif. esperada) → precisa zerar"]],
+            ],
+            columns=["Métrica", "Valor"],
         )
+        resumo_df.to_excel(writer, index=False, sheet_name="Resumo_Fechamento")
+
+        # Aba Painel (KPIs)
+        painel_df = pd.DataFrame(
+            [
+                ["Linhas Financeiro", stats["fin_total_linhas"]],
+                ["Linhas Contábil", stats["led_total_linhas"]],
+                ["Conciliadas Financeiro", stats["fin_conciliadas"]],
+                ["Conciliadas Contábil", stats["led_conciliadas"]],
+                ["Pendentes Financeiro", stats["fin_pendentes"]],
+                ["Pendentes Contábil", stats["led_pendentes"]],
+                ["Pendente Financeiro (valor)", stats["fin_pendente_valor"]],
+                ["Pendente Contábil (valor)", stats["led_pendente_valor"]],
+                ["Impacto pendentes (Fin-Cont)", stats["impacto"]],
+                ["Conferência (ideal 0,00)", stats["conferencia"]],
+            ],
+            columns=["Indicador", "Valor"],
+        )
+        painel_df.to_excel(writer, index=False, sheet_name="Painel")
 
         wb = writer.book
-        fmt_money = wb.add_format({"num_format": "#,##0.00"})
-        fmt_hdr = wb.add_format({"bold": True})
+        fmt_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1})
+        fmt_txt = wb.add_format({"border": 1})
+        fmt_money = wb.add_format({"num_format": "#,##0.00", "border": 1})
+        fmt_title = wb.add_format({"bold": True, "font_size": 14})
+        fmt_block = wb.add_format({"border": 1, "bold": True})
+        fmt_ok = wb.add_format({"border": 1, "bold": True})
+        fmt_bad = wb.add_format({"border": 1, "bold": True})
+        fmt_warn = wb.add_format({"border": 1, "bold": True})
 
-        for sh in ["Extrato_Financeiro", "Razao_Contabil", "Divergencias", "Resumo_Fechamento"]:
+        # Ajustes gerais nas abas
+        for sh in ["Extrato_Financeiro", "Razao_Contabil", "Divergencias"]:
             ws = writer.sheets[sh]
-            ws.set_row(0, None, fmt_hdr)
             ws.freeze_panes(1, 0)
+            ws.autofilter(0, 0, 0, max(0, (len({"Extrato_Financeiro": fin_out, "Razao_Contabil": led_out, "Divergencias": div}[sh].columns) - 1)))
+            ws.set_row(0, 20, fmt_hdr)
+            ws.set_column(0, 0, 14)
+            ws.set_column(1, 6, 26)
+            ws.set_column(7, 50, 18)
 
-            if sh == "Resumo_Fechamento":
-                ws.set_column(0, 0, 55)
-                ws.set_column(1, 1, 18, fmt_money)
+        # Formatação de STATUS com destaque
+        def apply_status_format(ws, df):
+            if "STATUS" not in df.columns:
+                return
+            col = df.columns.get_loc("STATUS")
+            last_row = len(df)
+            ws.conditional_format(1, col, last_row, col, {"type": "text", "criteria": "containing", "value": "Conciliado", "format": wb.add_format({"bold": True})})
+            ws.conditional_format(1, col, last_row, col, {"type": "text", "criteria": "containing", "value": "Pendente", "format": wb.add_format({"bold": True})})
+
+        apply_status_format(writer.sheets["Extrato_Financeiro"], fin_out)
+        apply_status_format(writer.sheets["Razao_Contabil"], led_out)
+
+        # Resumo_Fechamento estilo formulário
+        ws_r = writer.sheets["Resumo_Fechamento"]
+        ws_r.freeze_panes(1, 0)
+        ws_r.set_row(0, 20, fmt_hdr)
+        ws_r.set_column(0, 0, 68)
+        ws_r.set_column(1, 1, 20, fmt_money)
+
+        # Destacar conferência (linha onde contém "Conferência")
+        conf_row = None
+        for i, v in enumerate(resumo_df["Métrica"].tolist(), start=1):
+            if isinstance(v, str) and v.strip().lower().startswith("conferência"):
+                conf_row = i
+                break
+
+        if conf_row is not None:
+            # valor em B(conf_row)
+            conf_val = resumo_df.iloc[conf_row - 1, 1]
+            if pd.isna(conf_val):
+                ws_r.write(conf_row, 1, conf_val, fmt_warn)
             else:
-                ws.set_column(0, 0, 16)
-                ws.set_column(1, 5, 28)
-                ws.set_column(6, 30, 18, fmt_money)
+                if abs(float(conf_val)) < 0.005:
+                    ws_r.write(conf_row, 1, conf_val, wb.add_format({"num_format": "#,##0.00", "border": 2, "bold": True}))
+                else:
+                    ws_r.write(conf_row, 1, conf_val, wb.add_format({"num_format": "#,##0.00", "border": 2, "bold": True}))
+
+        # Painel com gráfico
+        ws_p = writer.sheets["Painel"]
+        ws_p.freeze_panes(1, 0)
+        ws_p.set_row(0, 20, fmt_hdr)
+        ws_p.set_column(0, 0, 34)
+        ws_p.set_column(1, 1, 20, fmt_money)
+
+        ws_p.write(0, 3, "Painel ConciliaMais", fmt_title)
+
+        # Tabela para gráfico (contagem)
+        ws_p.write(12, 0, "Categoria", fmt_hdr)
+        ws_p.write(12, 1, "Qtd", fmt_hdr)
+        ws_p.write(13, 0, "Conciliado", fmt_txt)
+        ws_p.write(13, 1, stats["fin_conciliadas"], fmt_txt)
+        ws_p.write(14, 0, "Pendente", fmt_txt)
+        ws_p.write(14, 1, stats["fin_pendentes"], fmt_txt)
+
+        chart = wb.add_chart({"type": "column"})
+        chart.add_series(
+            {
+                "name": "Financeiro",
+                "categories": ["Painel", 13, 0, 14, 0],
+                "values": ["Painel", 13, 1, 14, 1],
+            }
+        )
+        chart.set_title({"name": "Match vs Pendente (Financeiro)"})
+        chart.set_legend({"none": True})
+        chart.set_size({"width": 520, "height": 280})
+        ws_p.insert_chart(2, 3, chart)
 
     output.seek(0)
     return output
+
 
 def fmt(v):
     if v is None or (isinstance(v, float) and np.isnan(v)):
@@ -358,6 +539,7 @@ def fmt(v):
         return f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return str(v)
+
 
 # ----------------------------
 # UI
@@ -450,7 +632,9 @@ if fin_file and led_file:
     f_norm, l_norm = build_normalized(fin_df, led_df, cfg)
     saldo_ant_fin = compute_saldo_anterior(f_norm)
     saldo_ant_led = compute_saldo_anterior(l_norm)
-    diff_ant = (np.nan if (pd.isna(saldo_ant_fin) or pd.isna(saldo_ant_led)) else round(saldo_ant_fin - saldo_ant_led, 2))
+    diff_ant = (
+        np.nan if (pd.isna(saldo_ant_fin) or pd.isna(saldo_ant_led)) else round(saldo_ant_fin - saldo_ant_led, 2)
+    )
 
     st.divider()
     st.subheader("Alertas iniciais")
@@ -459,8 +643,8 @@ if fin_file and led_file:
         proceed_ok = True
     else:
         if abs(diff_ant) > 0.009:
-            st.warning(f"Saldo anterior NÃO bate (Fin - Cont = {fmt(diff_ant)}). Isso indica diferença em períodos anteriores.")
-            proceed_ok = st.checkbox("Quero prosseguir mesmo assim", value=False)
+            st.warning(f"Saldo anterior não bate (Fin - Cont = {fmt(diff_ant)}). Isso indica diferença em períodos anteriores.")
+            proceed_ok = st.checkbox("Prosseguir mesmo assim", value=False)
         else:
             st.success("Saldo anterior bate (OK).")
             proceed_ok = True
@@ -469,35 +653,39 @@ if fin_file and led_file:
 
     if run:
         with st.spinner("Processando..."):
-            fin_out, led_out, div, resumo = reconcile(fin_df, led_df, cfg, date_tol_days=int(date_tol))
+            fin_out, led_out, div, resumo, stats = reconcile(fin_df, led_df, cfg, date_tol_days=int(date_tol))
+
+        st.subheader("Painel")
+        a, b, c, d = st.columns(4)
+        a.metric("Conciliadas (Financeiro)", f"{stats['fin_conciliadas']} / {stats['fin_total_linhas']}")
+        b.metric("Pendentes (Financeiro)", f"{stats['fin_pendentes']}")
+        c.metric("Impacto pendentes (Fin-Cont)", fmt(stats["impacto"]))
+        d.metric("Conferência (ideal 0,00)", fmt(stats["conferencia"]))
+
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown("**Match vs Pendente (quantidade)**")
+            st.bar_chart(pd.DataFrame({"qtd": [stats["fin_conciliadas"], stats["fin_pendentes"]]}, index=["Conciliado", "Pendente"]))
+        with g2:
+            st.markdown("**Pendências (valor)**")
+            st.bar_chart(pd.DataFrame({"valor": [stats["fin_pendente_valor"], stats["led_pendente_valor"]]}, index=["Somente Financeiro", "Somente Contábil"]))
 
         st.subheader("Resumo de fechamento (precisa zerar)")
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Dif. saldo anterior (Fin-Cont)", fmt(resumo["Diferença de saldo anterior (Fin - Cont)"]))
-        r2.metric("Impacto pendentes (Fin-Cont)", fmt(resumo["Impacto líquido pendentes (Fin - Cont)"]))
-        r3.metric("Dif. final (Fin-Cont)", fmt(resumo["Diferença final (Fin - Cont)"]))
-        r4.metric("Conferência (ideal 0,00)", fmt(resumo["Conferência (Dif. final - Dif. esperada) → precisa zerar"]))
-
-        ponte_tbl = pd.DataFrame([
-            ["Saldo anterior (antes do 1º movimento) - Financeiro", resumo["Saldo anterior (antes do 1º movimento) - Financeiro"]],
-            ["Saldo anterior (antes do 1º movimento) - Contábil", resumo["Saldo anterior (antes do 1º movimento) - Contábil"]],
-            ["Diferença de saldo anterior (Fin - Cont)", resumo["Diferença de saldo anterior (Fin - Cont)"]],
-            ["Saldo final (último movimento) - Financeiro", resumo["Saldo final (último movimento) - Financeiro"]],
-            ["Saldo final (último movimento) - Contábil", resumo["Saldo final (último movimento) - Contábil"]],
-            ["Diferença final (Fin - Cont)", resumo["Diferença final (Fin - Cont)"]],
-            ["Soma pendente Somente Financeiro (Divergências)", resumo["Soma pendente Somente Financeiro (Divergências)"]],
-            ["Soma pendente Somente Contábil (Divergências)", resumo["Soma pendente Somente Contábil (Divergências)"]],
-            ["Impacto líquido pendentes (Fin - Cont)", resumo["Impacto líquido pendentes (Fin - Cont)"]],
-            ["Diferença esperada (Dif. saldo anterior + Impacto)", resumo["Diferença esperada (Dif. saldo anterior + Impacto)"]],
-            ["Conferência (Dif. final - Dif. esperada) → precisa zerar", resumo["Conferência (Dif. final - Dif. esperada) → precisa zerar"]],
-        ], columns=["Métrica", "Valor"])
-
-        st.dataframe(ponte_tbl, use_container_width=True, height=380)
+        ponte_tbl = pd.DataFrame(
+            [
+                ["Saldo anterior (Fin - Cont)", resumo["Diferença de saldo anterior (Fin - Cont)"]],
+                ["Impacto pendentes (Fin - Cont)", resumo["Impacto líquido pendentes (Fin - Cont)"]],
+                ["Diferença final (Fin - Cont)", resumo["Diferença final (Fin - Cont)"]],
+                ["Conferência (ideal 0,00)", resumo["Conferência (Dif. final - Dif. esperada) → precisa zerar"]],
+            ],
+            columns=["Métrica", "Valor"],
+        )
+        st.dataframe(ponte_tbl, use_container_width=True, height=170)
 
         st.subheader("Divergências (itens não pareados)")
-        st.dataframe(div, use_container_width=True, height=320)
+        st.dataframe(div, use_container_width=True, height=360)
 
-        excel_bytes = build_excel(fin_out, led_out, div, resumo)
+        excel_bytes = build_excel(fin_out, led_out, div, resumo, stats)
         st.download_button(
             "Baixar relatório Excel (ConciliaMais)",
             data=excel_bytes,
