@@ -362,45 +362,66 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
 
     return f_out, l_out, div, resumo, stats
 
-
 def build_excel(fin_out, led_out, div, resumo, stats):
     output = BytesIO()
+
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        # Abas base
         fin_out.to_excel(writer, index=False, sheet_name="Extrato_Financeiro")
         led_out.to_excel(writer, index=False, sheet_name="Razao_Contabil")
         div.to_excel(writer, index=False, sheet_name="Divergencias")
-        
-# Aba de tratativa (plano de ação)
-trat_df = pd.DataFrame(columns=[
-    "ORIGEM",
-    "DATA",
-    "IDENTIFICADOR",
-    "HISTORICO/OPERACAO",
-    "VALOR",
-    "ACAO_SUGERIDA",
-    "RESPONSAVEL",
-    "PRAZO",
-    "STATUS",
-    "OBS"
-])
 
-trat_df.to_excel(writer, index=False, sheet_name="Pendencias_Tratativa")
+        # Aba de tratativa (plano de ação)
+        trat_df = pd.DataFrame(columns=[
+            "ORIGEM",
+            "DATA",
+            "IDENTIFICADOR",
+            "HISTORICO/OPERACAO",
+            "VALOR",
+            "ACAO_SUGERIDA",
+            "RESPONSAVEL",
+            "PRAZO",
+            "STATUS",
+            "OBS"
+        ])
+        trat_df.to_excel(writer, index=False, sheet_name="Pendencias_Tratativa")
 
-ws_t = writer.sheets["Pendencias_Tratativa"]
-ws_t.freeze_panes(1, 0)
-ws_t.autofilter(0, 0, 0, len(trat_df.columns) - 1)
-ws_t.set_row(0, 20, fmt_hdr)
-ws_t.set_column(0, 0, 18)
-ws_t.set_column(1, 1, 12)
-ws_t.set_column(2, 2, 28)
-ws_t.set_column(3, 3, 50)
-ws_t.set_column(4, 4, 16, fmt_money)
-ws_t.set_column(5, 5, 34)
-ws_t.set_column(6, 6, 18)
-ws_t.set_column(7, 7, 12)
-ws_t.set_column(8, 8, 14)
-ws_t.set_column(9, 9, 40)
-        
+        # Resumo (formato simples, sem bagunçar)
+        resumo_df = pd.DataFrame(list(resumo.items()), columns=["Métrica", "Valor"])
+        resumo_df.to_excel(writer, index=False, sheet_name="Resumo_Fechamento")
+
+        # Formatações básicas
+        wb = writer.book
+
+        fmt_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1})
+        fmt_money = wb.add_format({"num_format": "#,##0.00", "border": 1})
+
+        # Ajustes gerais (freeze + cabeçalho)
+        for sh in ["Extrato_Financeiro", "Razao_Contabil", "Divergencias", "Pendencias_Tratativa", "Resumo_Fechamento"]:
+            ws = writer.sheets[sh]
+            ws.freeze_panes(1, 0)
+            ws.set_row(0, 20, fmt_hdr)
+
+        # Larguras (tratativa e resumo)
+        ws_t = writer.sheets["Pendencias_Tratativa"]
+        ws_t.autofilter(0, 0, 0, len(trat_df.columns) - 1)
+        ws_t.set_column(0, 0, 18)     # ORIGEM
+        ws_t.set_column(1, 1, 12)     # DATA
+        ws_t.set_column(2, 2, 28)     # IDENTIFICADOR
+        ws_t.set_column(3, 3, 50)     # HISTORICO/OPERACAO
+        ws_t.set_column(4, 4, 16, fmt_money)  # VALOR
+        ws_t.set_column(5, 5, 34)     # ACAO_SUGERIDA
+        ws_t.set_column(6, 6, 18)     # RESPONSAVEL
+        ws_t.set_column(7, 7, 12)     # PRAZO
+        ws_t.set_column(8, 8, 14)     # STATUS
+        ws_t.set_column(9, 9, 40)     # OBS
+
+        ws_r = writer.sheets["Resumo_Fechamento"]
+        ws_r.set_column(0, 0, 68)
+        ws_r.set_column(1, 1, 20, fmt_money)
+
+    output.seek(0)
+    return output      
 
         # Resumo em formato formulário
         resumo_df = pd.DataFrame(
