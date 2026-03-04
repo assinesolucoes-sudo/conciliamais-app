@@ -147,16 +147,21 @@ def build_normalized(fin_df, led_df, cfg):
     return f, l
 
 def compute_saldo_anterior(df_norm):
-    dfv = df_norm.dropna(subset=["__amount"]).copy()
+    # usa SOMENTE linhas de movimento (DATA preenchida)
+    dfv = df_norm.copy()
+    dfv = dfv[dfv["__date"].notna()].copy()
+    dfv = dfv[dfv["__amount"].notna()].copy()
     dfv = dfv[dfv["__saldo"].notna()].copy()
     if dfv.empty:
         return np.nan
     r = dfv.iloc[0]
-    # saldo anterior = saldo atual (após movimento) - movimento
     return round(float(r["__saldo"]) - float(r["__amount"]), 2)
 
 def compute_saldo_final(df_norm):
-    dfv = df_norm.dropna(subset=["__amount"]).copy()
+    # usa SOMENTE linhas de movimento (DATA preenchida)
+    dfv = df_norm.copy()
+    dfv = dfv[dfv["__date"].notna()].copy()
+    dfv = dfv[dfv["__amount"].notna()].copy()
     dfv = dfv[dfv["__saldo"].notna()].copy()
     if dfv.empty:
         return np.nan
