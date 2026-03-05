@@ -13,88 +13,112 @@ from reportlab.lib import colors
 
 st.set_page_config(page_title="ConciliaMais — Conferência de Extrato Bancário", layout="wide")
 
-# ============================
-# TEMA CLARO (CSS)
-# ============================
+# ----------------------------
+# CSS (Light Theme + UX)
+# ----------------------------
 st.markdown(
     """
 <style>
-/* Fundo geral (claro) */
-html, body, [class*="css"]  { background: #F6F7FB !important; }
-.block-container { padding-top: 1.1rem; padding-bottom: 2rem; max-width: 1400px; }
+:root{
+  --bg: #F7F9FC;
+  --card: #FFFFFF;
+  --border: #E6EAF2;
+  --text: #0F172A;
+  --muted: #64748B;
+  --primary: #2563EB;
+  --ok: #16A34A;
+  --warn: #F59E0B;
+  --bad: #DC2626;
+  --shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+}
 
-/* Títulos */
-h1, h2, h3 { letter-spacing: -0.02em; color:#0F172A; }
-p, label, span, div { color:#0F172A; }
+html, body, [class*="css"]  { color: var(--text) !important; }
+body { background: var(--bg) !important; }
+.block-container {
+  padding-top: 1.0rem;
+  padding-bottom: 2.2rem;
+  max-width: 1450px;
+}
 
-/* Cards */
-.cm-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 10px; }
+h1, h2, h3 { letter-spacing: -0.02em; }
+small, .stCaption, .stMarkdown p { color: var(--muted); }
+
+.cm-shell {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 14px;
+  box-shadow: var(--shadow);
+}
+
+.cm-help { color: var(--muted); font-size: 13px; margin-top: -6px; }
+.cm-section { margin-top: 16px; }
+
+.cm-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 10px; }
 .cm-card {
   border-radius: 16px;
   padding: 14px 14px 12px 14px;
-  background: #FFFFFF;
-  border: 1px solid #E5E7EB;
-  box-shadow: 0 1px 10px rgba(15, 23, 42, 0.05);
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
 }
-.cm-card .k { font-size: 12px; opacity: .75; margin-bottom: 8px; color:#334155; }
-.cm-card .v { font-size: 22px; font-weight: 800; color:#0F172A; }
-.cm-card .s { font-size: 12px; opacity: .75; margin-top: 6px; color:#334155; }
-
-/* Pílulas */
-.cm-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 800; border:1px solid transparent; }
-.cm-ok   { background:#ECFDF5; color:#047857; border-color:#A7F3D0; }
-.cm-warn { background:#FFFBEB; color:#B45309; border-color:#FDE68A; }
-.cm-bad  { background:#FEF2F2; color:#B91C1C; border-color:#FCA5A5; }
-
-/* Boxes */
-.cm-box {
-  border-radius: 16px;
-  padding: 14px;
-  background: #FFFFFF;
-  border: 1px solid #E5E7EB;
-  box-shadow: 0 1px 10px rgba(15, 23, 42, 0.05);
-}
-.cm-help { opacity: .75; font-size: 13px; margin-top: -6px; color:#334155; }
+.cm-card .k { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.cm-card .v { font-size: 22px; font-weight: 900; color: var(--text); }
+.cm-card .s { font-size: 12px; color: var(--muted); margin-top: 6px; }
 
 .cm-mini {
   border-radius: 14px;
   padding: 10px 12px;
-  background: #FFFFFF;
-  border: 1px solid #E5E7EB;
-  box-shadow: 0 1px 10px rgba(15, 23, 42, 0.05);
+  background: var(--card);
+  border: 1px solid var(--border);
   text-align: right;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
 }
-.cm-mini .k { font-size: 12px; opacity: .75; margin-bottom: 4px; color:#334155; }
-.cm-mini .v { font-size: 20px; font-weight: 900; letter-spacing: -0.01em; color:#0F172A; }
+.cm-mini .k { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.cm-mini .v { font-size: 20px; font-weight: 900; letter-spacing: -0.01em; color: var(--text); }
 
-/* Detalhe item */
+.cm-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 800; border: 1px solid transparent; }
+.cm-ok { background: rgba(22,163,74,.10); color: var(--ok); border-color: rgba(22,163,74,.25); }
+.cm-warn { background: rgba(245,158,11,.12); color: #8A5A00; border-color: rgba(245,158,11,.25); }
+.cm-bad { background: rgba(220,38,38,.10); color: var(--bad); border-color: rgba(220,38,38,.22); }
+
+.cm-tag { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; border: 1px solid var(--border); background: #F8FAFC; color: var(--text); }
+.cm-dot { width:8px; height:8px; border-radius:99px; display:inline-block; }
+.cm-dot-fin { background: #2563EB; }
+.cm-dot-led { background: #7C3AED; }
+.cm-dot-ok { background: var(--ok); }
+.cm-dot-warn { background: var(--warn); }
+.cm-dot-bad { background: var(--bad); }
+
 .cm-detail {
   border-radius: 16px;
   padding: 14px;
-  background: #FFFFFF;
-  border: 1px solid #E5E7EB;
-  box-shadow: 0 1px 10px rgba(15, 23, 42, 0.05);
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
 }
-.cm-detail .title { font-size: 14px; font-weight: 900; margin-bottom: 10px; color:#0F172A; }
-.cm-detail .row { font-size: 13px; margin: 4px 0; color:#0F172A; }
-.cm-detail .label { opacity: .70; color:#334155; }
-.cm-detail .val { font-weight: 700; color:#0F172A; }
+.cm-detail .title { font-size: 14px; font-weight: 900; margin-bottom: 10px; }
+.cm-detail .row { font-size: 13px; margin: 4px 0; }
+.cm-detail .label { color: var(--muted); }
+.cm-detail .val { font-weight: 700; color: var(--text); }
 
-/* Ajustes do expander */
-details summary { font-weight: 800 !important; }
-
-/* Suavizar inputs */
-[data-baseweb="input"], [data-baseweb="select"] > div {
-  background: #FFFFFF !important;
+.cm-subtle{
+  background:#F8FAFC;
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:10px 12px;
 }
+.cm-subtle .t{ font-size:12px; color:var(--muted); margin-bottom:6px; }
+.cm-subtle .b{ font-size:14px; font-weight:800; color:var(--text); }
+
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-# ============================
+# ----------------------------
 # Helpers (motor)
-# ============================
+# ----------------------------
 def _to_date_series(s):
     out = pd.to_datetime(s, errors="coerce", dayfirst=True)
     if out.notna().mean() < 0.6:
@@ -285,39 +309,33 @@ def extract_doc_from_ledger_history(x):
         return nums[-1]
     return ""
 
-def suggest_nucleo(row):
-    origem = str(row.get("ORIGEM", "")).lower()
-    hist = str(row.get("HISTORICO_OPERACAO", "")).lower()
-    doc = str(row.get("DOCUMENTO", "")).strip()
-
-    if any(k in hist for k in ["cancelamento de baixa", "canc baixa", "estorno de baixa", "estorno baixa", "canc. baixa"]):
-        return "Processo interno"
-    if any(k in hist for k in ["baixa", "liquidação", "liquidacao", "pagamento", "pagto", "estorno"]):
-        return "Processo interno"
-    if "somente financeiro" in origem and (doc != "" or "mov" in hist):
-        return "Cadastro"
-    if any(k in hist for k in ["rp", "reprocess", "rotina", "processamento", "integracao", "integração"]):
-        return "Configuração RP"
-    return "Não identificado"
-
-# Motivo fixo por núcleo (1 pra 1)
-NUCLEO_MOTIVO = {
-    "Processo interno": "Processo interno — revisar execução (baixa/estorno/cancelamento) e consistência do processo",
+# ----------------------------
+# Núcleo -> Motivo padrão (quando confirma núcleo, motivo já se estabelece)
+# ----------------------------
+NUCLEO_TO_MOTIVO_PADRAO = {
+    "Processo interno": "Processo interno — revisar execução (baixa/estorno/cancelamento e consistência contábil)",
     "Cadastro": "Cadastro — financeiro sem contabilização / revisar natureza/parametrização contábil",
-    "Configuração RP": "Configuração RP — possível falha/ausência de rotina (RP) / revisar parametrização e execução",
+    "Configuração RP": "Configuração RP — rotina (RP) não executada/parametrização ausente/integração pendente",
     "Não identificado": "Não identificado — revisar caso e ajustar classificação",
 }
 
-def severidade_por_valor(v):
-    try:
-        x = abs(float(v))
-    except Exception:
-        return "Normal"
-    if x >= 50000:
-        return "Crítica"
-    if x >= 5000:
-        return "Atenção"
-    return "Normal"
+def suggest_nucleo_motivo(row):
+    origem = str(row.get("ORIGEM", "")).lower()
+    hist = str(row.get("HISTORICO_OPERACAO", "")).lower()
+    doc = str(row.get("DOCUMENTO","")).strip()
+
+    if any(k in hist for k in ["cancelamento de baixa", "canc baixa", "estorno de baixa", "estorno baixa", "canc. baixa"]):
+        return ("Processo interno", "Cancelamento/estorno de baixa — possível estorno sem confirmar contabilização")
+    if any(k in hist for k in ["baixa", "liquidação", "liquidacao", "pagamento", "pagto", "estorno"]):
+        return ("Processo interno", "Movimento de baixa/estorno — revisar execução completa do processo")
+
+    if "somente financeiro" in origem and (doc != "" or "mov" in hist or "titulo" in hist or "título" in hist):
+        return ("Cadastro", "Financeiro sem contabilização — revisar natureza/parametrização contábil")
+
+    if any(k in hist for k in ["rp", "reprocess", "rotina", "processamento", "integracao", "integração"]):
+        return ("Configuração RP", "Possível falha/ausência de rotina (RP) — revisar parametrização e execução")
+
+    return ("Não identificado", "Não identificado — preencher conforme análise")
 
 def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     f, l = build_normalized(fin_df, led_df, cfg)
@@ -450,11 +468,41 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
         "saldo_led": float(saldo_led) if pd.notna(saldo_led) else np.nan,
         "conferencia": float(conferencia) if pd.notna(conferencia) else np.nan,
     }
+
     return div, stats
 
-# ============================
-# Excel (corrigido: cabeçalho claro + fonte preta)
-# ============================
+# ----------------------------
+# UX helpers
+# ----------------------------
+def severidade(valor) -> str:
+    try:
+        v = abs(float(valor))
+    except Exception:
+        return "Normal"
+    if v <= 100:
+        return "Normal"
+    if v <= 1000:
+        return "Atenção"
+    return "Crítica"
+
+def origem_tag(origem: str) -> str:
+    if str(origem) == "Somente Financeiro":
+        return '<span class="cm-tag"><span class="cm-dot cm-dot-fin"></span>Somente Financeiro</span>'
+    if str(origem) == "Somente Contábil":
+        return '<span class="cm-tag"><span class="cm-dot cm-dot-led"></span>Somente Contábil</span>'
+    return '<span class="cm-tag"><span class="cm-dot"></span>Todas</span>'
+
+def severidade_tag(label: str) -> str:
+    lab = str(label)
+    if lab == "Normal":
+        return '<span class="cm-tag"><span class="cm-dot cm-dot-ok"></span>Normal</span>'
+    if lab == "Atenção":
+        return '<span class="cm-tag"><span class="cm-dot cm-dot-warn"></span>Atenção</span>'
+    return '<span class="cm-tag"><span class="cm-dot cm-dot-bad"></span>Crítica</span>'
+
+# ----------------------------
+# Excel: igual ao filtro (formatado)
+# ----------------------------
 def _autofit_worksheet(ws, df, start_col, max_width=75, min_width=10):
     for j, col in enumerate(df.columns):
         ser = df[col].astype(str).fillna("")
@@ -467,18 +515,13 @@ def to_excel_divergencias_filtradas(df_filtrado, total_filtrado, total_aberto, f
     out = BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as w:
         wb = w.book
-
-        fmt_title = wb.add_format({"bold": True, "font_size": 14, "font_color": "#0F172A"})
-        fmt_k = wb.add_format({"bold": True, "font_size": 10, "font_color": "#334155"})
-        fmt_txt = wb.add_format({"border": 1, "font_color": "#0F172A"})
-        fmt_hdr = wb.add_format({
-            "bold": True, "border": 1,
-            "align": "center", "valign": "vcenter",
-            "bg_color": "#EEF2FF", "font_color": "#0F172A"
-        })
-        fmt_date = wb.add_format({"num_format": "dd/mm/yyyy", "border": 1, "font_color": "#0F172A"})
-        fmt_money = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "border": 1, "font_color": "#0F172A"})
-        fmt_money_big = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "bold": True, "font_color": "#0F172A"})
+        fmt_title = wb.add_format({"bold": True, "font_size": 14})
+        fmt_k = wb.add_format({"bold": True, "font_size": 10, "font_color": "#475569"})
+        fmt_txt = wb.add_format({"border": 1})
+        fmt_hdr = wb.add_format({"bold": True, "border": 1, "align": "center", "valign": "vcenter", "bg_color": "#EEF2FF"})
+        fmt_date = wb.add_format({"num_format": "dd/mm/yyyy", "border": 1})
+        fmt_money = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "border": 1})
+        fmt_money_big = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "bold": True})
 
         sh = "Divergencias"
         df = df_filtrado.copy()
@@ -500,13 +543,15 @@ def to_excel_divergencias_filtradas(df_filtrado, total_filtrado, total_aberto, f
         ws.write(2, 1, filtros.get("origem", "Todas"))
         ws.write(3, 0, "Visualização:", fmt_k)
         ws.write(3, 1, filtros.get("ver", "Todas"))
-        ws.write(4, 0, "Busca:", fmt_k)
-        ws.write(4, 1, filtros.get("busca", ""))
+        ws.write(4, 0, "Severidade:", fmt_k)
+        ws.write(4, 1, filtros.get("severidade", "Todas"))
+        ws.write(5, 0, "Busca:", fmt_k)
+        ws.write(5, 1, filtros.get("busca", ""))
 
-        ws.write(2, 4, "Total do filtro:", fmt_k)
-        ws.write_number(2, 5, float(total_filtrado or 0.0), fmt_money_big)
-        ws.write(3, 4, "Total em aberto:", fmt_k)
-        ws.write_number(3, 5, float(total_aberto or 0.0), fmt_money_big)
+        ws.write(2, 5, "Total do filtro:", fmt_k)
+        ws.write_number(2, 6, float(total_filtrado or 0.0), fmt_money_big)
+        ws.write(3, 5, "Total em aberto:", fmt_k)
+        ws.write_number(3, 6, float(total_aberto or 0.0), fmt_money_big)
 
         ws.set_row(start_row_table, 20, fmt_hdr)
         ws.freeze_panes(start_row_table + 1, 0)
@@ -514,14 +559,13 @@ def to_excel_divergencias_filtradas(df_filtrado, total_filtrado, total_aberto, f
         nrows = len(df)
         ncols = len(df.columns) + 1
 
-        # tabela com estilo CLARO
         if nrows > 0 and ncols > 0:
             table_last_row = start_row_table + nrows
             table_last_col = ncols - 1
             columns = [{"header": "ID"}] + [{"header": c} for c in df.columns]
             ws.add_table(
                 start_row_table, 0, table_last_row, table_last_col,
-                {"style": "Table Style Light 9", "columns": columns, "autofilter": True}
+                {"style": "Table Style Medium 9", "columns": columns, "autofilter": True}
             )
 
         col_idx = {c: i+1 for i, c in enumerate(df.columns)}
@@ -565,14 +609,14 @@ def to_excel_divergencias_filtradas(df_filtrado, total_filtrado, total_aberto, f
         ws3.freeze_panes(1, 0)
         ws3.set_row(0, 20, fmt_hdr)
         ws3.set_column(0, 0, 52)
-        ws3.set_column(1, 1, 26, wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "font_color": "#0F172A"}))
+        ws3.set_column(1, 1, 26, wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'}))
 
     out.seek(0)
     return out
 
-# ============================
-# PDF Resumo (mantido)
-# ============================
+# ----------------------------
+# PDF Resumo
+# ----------------------------
 def to_pdf_resumo(stats, generated_at, div_master):
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
@@ -588,7 +632,13 @@ def to_pdf_resumo(stats, generated_at, div_master):
     df["VALOR"] = df["VALOR"].map(normalize_money)
     df = df[df["VALOR"].notna()].copy()
 
-    resolved = df["RESOLVIDO"].fillna(False) | (df["STATUS"].astype(str).str.lower().eq("resolvido"))
+    resolved = df.get("RESOLVIDO", False)
+    if isinstance(resolved, (pd.Series, pd.Index)):
+        resolved = resolved.fillna(False)
+    else:
+        resolved = pd.Series([False] * len(df), index=df.index)
+    status = df.get("STATUS", "Pendente").astype(str).fillna("Pendente")
+    resolved = resolved | (status.str.lower().eq("resolvido"))
     df["__RES"] = resolved
 
     total_itens = len(df)
@@ -610,11 +660,11 @@ def to_pdf_resumo(stats, generated_at, div_master):
     ]
     t1 = Table(kpi_data, colWidths=[240, 260])
     t1.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1E293B")),
         ("TEXTCOLOR", (0,0), (-1,0), colors.white),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#D1D5DB")),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F9FAFB")]),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F8FAFC")]),
     ]))
     story.append(t1)
     story.append(Spacer(1, 14))
@@ -637,101 +687,105 @@ def to_pdf_resumo(stats, generated_at, div_master):
     ]
     t2 = Table(comp, colWidths=[340, 160])
     t2.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1E293B")),
         ("TEXTCOLOR", (0,0), (-1,0), colors.white),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#D1D5DB")),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F9FAFB")]),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F8FAFC")]),
     ]))
     story.append(t2)
     story.append(Spacer(1, 14))
 
-    story.append(Paragraph("Distribuição por núcleo (confirmado)", styles["Heading2"]))
+    story.append(Paragraph("Top 10 pendências mais impactantes (em aberto)", styles["Heading2"]))
     story.append(Spacer(1, 6))
 
-    nuc = df.copy()
-    nuc["NUCLEO_CONFIRMADO"] = nuc["NUCLEO_CONFIRMADO"].fillna("Não identificado").replace("", "Não identificado")
-    dist = nuc.groupby("NUCLEO_CONFIRMADO", dropna=False).agg(
-        Itens=("VALOR", "size"),
-        Valor=("VALOR", "sum"),
-        Abertos=("__RES", lambda x: int((~x).sum()))
-    ).reset_index().sort_values("Valor", ascending=False)
+    top = df.loc[~df["__RES"]].copy()
+    top["ABS"] = top["VALOR"].abs()
+    top = top.sort_values(["ABS"], ascending=False).head(10)
 
-    dist_rows = [["Núcleo", "Itens", "Abertos", "Valor"]]
-    for _, r in dist.iterrows():
-        dist_rows.append([str(r["NUCLEO_CONFIRMADO"]), str(int(r["Itens"])), str(int(r["Abertos"])), fmt(float(r["Valor"]))])
+    top_rows = [["#", "Origem", "Data", "Documento", "Valor", "Núcleo"]]
+    for i, (_, r) in enumerate(top.iterrows(), start=1):
+        dt = ""
+        try:
+            dt = pd.to_datetime(r.get("DATA")).strftime("%d/%m/%Y") if pd.notna(r.get("DATA")) else ""
+        except Exception:
+            dt = str(r.get("DATA") or "")
+        top_rows.append([
+            str(i),
+            str(r.get("ORIGEM","")),
+            dt,
+            str(r.get("DOCUMENTO","")),
+            fmt(float(r.get("VALOR", 0.0))),
+            str(r.get("NUCLEO_CONFIRMADO","Não identificado") or "Não identificado"),
+        ])
 
-    t4 = Table(dist_rows, colWidths=[220, 60, 60, 160])
-    t4.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
+    t_top = Table(top_rows, colWidths=[22, 85, 58, 175, 75, 80])
+    t_top.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1E293B")),
         ("TEXTCOLOR", (0,0), (-1,0), colors.white),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#D1D5DB")),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F9FAFB")]),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F8FAFC")]),
+        ("ALIGN", (0,0), (0,-1), "CENTER"),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
     ]))
-    story.append(t4)
+    story.append(t_top)
     story.append(Spacer(1, 14))
-
-    concl = "Conclusão: Pendências em aberto — revisar itens e concluir tratativa."
-    try:
-        if abs(val_ab) <= 0.01:
-            concl = "Conclusão: Tratativa concluída — pendências em aberto zeradas (0,00)."
-            conf = stats.get("conferencia", np.nan)
-            if pd.notna(conf) and abs(float(conf)) <= 0.01:
-                concl += " Fechamento do cálculo consistente (0,00)."
-            else:
-                concl += " Atenção: fechamento do cálculo ainda requer validação."
-    except Exception:
-        pass
-
-    story.append(Paragraph("Conclusão", styles["Heading2"]))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph(concl, styles["Normal"]))
 
     doc.build(story)
     buf.seek(0)
     return buf
 
-# ============================
-# Estado
-# ============================
+# ----------------------------
+# State
+# ----------------------------
 if "page" not in st.session_state:
     st.session_state.page = "upload"
 if "results" not in st.session_state:
     st.session_state.results = None
 if "div_master" not in st.session_state:
     st.session_state.div_master = None
+if "upload_step" not in st.session_state:
+    st.session_state.upload_step = 1
 
 NUCLEOS = ["Processo interno", "Cadastro", "Configuração RP", "Não identificado"]
 STATUS_OPTS = ["Pendente", "Em análise", "Resolvido"]
 
-# ============================
-# Página: Upload
-# ============================
+# ----------------------------
+# Página: Upload (Wizard)
+# ----------------------------
 if st.session_state.page == "upload":
     st.title("ConciliaMais — Conferência de Extrato Bancário")
     st.caption("Extrato Financeiro + Razão Contábil → Match automático → Divergências → Tratativa")
 
-    # Régua de etapas (simples e clara)
-    st.progress(1/4)
-    st.markdown('<div class="cm-help">Etapa 1 de 4 — Upload dos arquivos</div>', unsafe_allow_html=True)
+    with st.container():
+        st.markdown('<div class="cm-shell">', unsafe_allow_html=True)
+        st.markdown("### Etapas")
+        st.progress(min(max((st.session_state.upload_step - 1) / 3, 0.0), 1.0))
+        st.markdown(
+            "<div class='cm-help'>1) Upload  |  2) Mapeamento  |  3) Validação de saldos  |  4) Processar</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="cm-section"></div>', unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Extrato Financeiro")
+        st.subheader("1) Extrato Financeiro")
         st.markdown('<div class="cm-help">Faça o upload da planilha do Extrato Financeiro.</div>', unsafe_allow_html=True)
         fin_file = st.file_uploader("Upload do Extrato Financeiro (.xlsx ou .csv)", type=["xlsx","csv"], key="fin")
     with c2:
-        st.subheader("Razão Contábil")
+        st.subheader("1) Razão Contábil")
         st.markdown('<div class="cm-help">Faça o upload da planilha do Razão Contábil.</div>', unsafe_allow_html=True)
         led_file = st.file_uploader("Upload do Razão Contábil (.xlsx ou .csv)", type=["xlsx","csv"], key="led")
 
     if not fin_file or not led_file:
-        st.info("Faça o upload dos dois arquivos para liberar o processamento.")
+        st.session_state.upload_step = 1
+        st.info("Faça o upload dos dois arquivos para liberar o restante.")
         st.stop()
 
-    st.progress(2/4)
-    st.markdown('<div class="cm-help">Etapa 2 de 4 — Mapeamento de colunas</div>', unsafe_allow_html=True)
+    st.session_state.upload_step = 2
 
     fin_df = read_table(fin_file)
     led_df = read_table(led_file)
@@ -739,7 +793,7 @@ if st.session_state.page == "upload":
     fin_guess = auto_detect_financial(fin_df)
     led_guess = auto_detect_ledger(led_df)
 
-    st.markdown("### Mapeamento de colunas (auto-detectado — ajuste se precisar)")
+    st.markdown("### 2) Mapeamento de colunas (auto-detectado — ajuste se precisar)")
     a, b = st.columns(2)
 
     with a:
@@ -813,9 +867,9 @@ if st.session_state.page == "upload":
         "led_saldo": None if led_saldo == "(nenhuma)" else led_saldo,
     }
 
-    st.progress(3/4)
-    st.markdown('<div class="cm-help">Etapa 3 de 4 — Validação (saldo anterior)</div>', unsafe_allow_html=True)
+    st.session_state.upload_step = 3
 
+    st.markdown("### 3) Alertas iniciais (Saldo anterior)")
     f_norm, l_norm = build_normalized(fin_df, led_df, cfg)
     saldo_ant_fin = compute_saldo_anterior(f_norm)
     saldo_ant_led = compute_saldo_anterior(l_norm)
@@ -823,7 +877,7 @@ if st.session_state.page == "upload":
 
     proceed_ok = True
     if pd.isna(diff_ant):
-        st.info("Não foi possível calcular saldo anterior automaticamente. Selecione a coluna de saldo em ambos os arquivos, se existir.")
+        st.info("Não foi possível calcular saldo anterior automaticamente. Se existir saldo nos dois arquivos, selecione a coluna de saldo.")
     else:
         if abs(diff_ant) > 0.01:
             st.warning(f"Saldo anterior não bate (Fin - Cont = {fmt(diff_ant)}). Diferença pode estar em períodos anteriores.")
@@ -833,8 +887,7 @@ if st.session_state.page == "upload":
 
     date_tol = st.number_input("Tolerância de dias para match por data (0 = mesma data)", min_value=0, max_value=10, value=0, step=1)
 
-    st.progress(4/4)
-    st.markdown('<div class="cm-help">Etapa 4 de 4 — Processamento</div>', unsafe_allow_html=True)
+    st.session_state.upload_step = 4
 
     if st.button("Processar e ir para Resultados", type="primary", disabled=not proceed_ok):
         with st.spinner("Processando..."):
@@ -850,7 +903,6 @@ if st.session_state.page == "upload":
             if c in div.columns:
                 div[c] = div[c].replace({np.nan: "", "nan": "", "None": ""}).astype(str).str.strip()
 
-        # Financeiro: DOCUMENTO prioriza prefixo/título
         mask_fin = div["ORIGEM"].eq("Somente Financeiro")
         if "PREFIXO_TITULO" in div.columns:
             div.loc[mask_fin, "DOCUMENTO"] = div.loc[mask_fin, "PREFIXO_TITULO"].where(
@@ -858,39 +910,49 @@ if st.session_state.page == "upload":
                 div.loc[mask_fin, "DOCUMENTO"]
             )
 
-        # Contábil: tenta extrair documento do histórico
         mask_led = div["ORIGEM"].eq("Somente Contábil")
         if "HISTORICO_OPERACAO" in div.columns:
             missing = mask_led & (div["DOCUMENTO"].astype(str).str.len() == 0)
             div.loc[missing, "DOCUMENTO"] = div.loc[missing, "HISTORICO_OPERACAO"].map(extract_doc_from_ledger_history)
 
-        # Remover colunas não desejadas
         for dropc in ["PREFIXO_TITULO", "CONTA"]:
             if dropc in div.columns:
                 div = div.drop(columns=[dropc])
 
-        # Núcleo sugerido e motivo fixo
-        div["NUCLEO_CONFIRMADO"] = div.apply(suggest_nucleo, axis=1)
-        div["MOTIVO_CONFIRMADO"] = div["NUCLEO_CONFIRMADO"].map(lambda x: NUCLEO_MOTIVO.get(x, NUCLEO_MOTIVO["Não identificado"]))
+        # Sugestões: Núcleo + Motivo
+        nuc_sug, mot_sug = [], []
+        for _, r in div.iterrows():
+            n, m = suggest_nucleo_motivo(r)
+            nuc_sug.append(n)
+            mot_sug.append(m)
+
+        div["NUCLEO_SUGERIDO"] = nuc_sug
+        div["MOTIVO_SUGERIDO"] = mot_sug
+
+        # Tratativa simplificada:
+        # - Usuário confirma apenas o NÚCLEO
+        # - Motivo confirmado é derivado do núcleo (motivo padrão), com possibilidade opcional de OBS.
+        div["NUCLEO_CONFIRMADO"] = div["NUCLEO_SUGERIDO"]
+        div["MOTIVO_CONFIRMADO"] = div["NUCLEO_CONFIRMADO"].map(lambda x: NUCLEO_TO_MOTIVO_PADRAO.get(str(x), ""))
         div["OBS_USUARIO"] = ""
         div["STATUS"] = "Pendente"
         div["RESOLVIDO"] = False
 
-        # Severidade + Origem exibida com sinal embutido
-        div["SEVERIDADE"] = div["VALOR"].map(severidade_por_valor)
-        div["ORIGEM_EXIBICAO"] = div.apply(lambda r: f"{r['SEVERIDADE']} • {r['ORIGEM']}", axis=1)
+        # UX
+        div["SEVERIDADE"] = div["VALOR"].map(severidade)
+        div["SELECIONADO"] = False
 
         div = div.reset_index(drop=True)
-        div.index = np.arange(1, len(div) + 1)  # ID 1..N
+        div.index = np.arange(1, len(div) + 1)
 
         st.session_state.results = {"stats": stats, "generated_at": generated_at}
         st.session_state.div_master = div
         st.session_state.page = "resultados"
         st.rerun()
 
-# ============================
+# ----------------------------
 # Página: Resultados
-# ============================
+# ----------------------------
 else:
     if not st.session_state.results or st.session_state.div_master is None:
         st.session_state.page = "upload"
@@ -907,63 +969,28 @@ else:
     div_master["RESOLVIDO"] = div_master["RESOLVIDO"].fillna(False)
     div_master["STATUS"] = div_master["STATUS"].fillna("Pendente").astype(str)
 
+    if "SEVERIDADE" not in div_master.columns:
+        div_master["SEVERIDADE"] = div_master["VALOR"].map(severidade)
+    if "SELECIONADO" not in div_master.columns:
+        div_master["SELECIONADO"] = False
+    if "MOTIVO_CONFIRMADO" not in div_master.columns:
+        div_master["MOTIVO_CONFIRMADO"] = div_master.get("NUCLEO_CONFIRMADO", "Não identificado").map(
+            lambda x: NUCLEO_TO_MOTIVO_PADRAO.get(str(x), "")
+        )
+
+    # Sempre que Núcleo confirmado mudar (ou vier vazio), motivo confirmado acompanha por padrão
+    div_master["NUCLEO_CONFIRMADO"] = div_master.get("NUCLEO_CONFIRMADO", "Não identificado").fillna("Não identificado").replace("", "Não identificado")
+    div_master["MOTIVO_CONFIRMADO"] = div_master["NUCLEO_CONFIRMADO"].map(lambda x: NUCLEO_TO_MOTIVO_PADRAO.get(str(x), ""))
+
     # Coerência: RESOLVIDO -> STATUS Resolvido
     div_master.loc[div_master["RESOLVIDO"], "STATUS"] = "Resolvido"
     st.session_state.div_master = div_master
 
-    # ========================
-    # Filtros (limpos)
-    # ========================
-    f1, f2, f3, f4 = st.columns([1.15, 1.05, 2.3, 1.1])
-    with f1:
-        origem = st.selectbox("Filtrar por origem", ["Todas", "Somente Financeiro", "Somente Contábil"])
-    with f2:
-        ver = st.selectbox("Visualizar", ["Todas", "Somente em aberto", "Somente resolvidas"])
-    with f3:
-        busca = st.text_input("Buscar (documento, histórico, chave, núcleo, obs)", value="")
-    with f4:
-        quick = st.selectbox("Atalho", ["(nenhum)", "Somente Crítica", "Atenção + Crítica"], index=0)
-
-    df = div_master.copy()
-
-    if origem != "Todas":
-        df = df[df["ORIGEM"] == origem].copy()
-
-    resolved_mask = df["RESOLVIDO"] | (df["STATUS"].astype(str).str.lower().eq("resolvido"))
-    if ver == "Somente em aberto":
-        df = df[~resolved_mask].copy()
-    elif ver == "Somente resolvidas":
-        df = df[resolved_mask].copy()
-
-    if quick == "Somente Crítica":
-        df = df[df["SEVERIDADE"].eq("Crítica")].copy()
-    elif quick == "Atenção + Crítica":
-        df = df[df["SEVERIDADE"].isin(["Atenção", "Crítica"])].copy()
-
-    if busca.strip():
-        q = busca.strip().lower()
-        cols_search = ["DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "NUCLEO_CONFIRMADO", "MOTIVO_CONFIRMADO", "OBS_USUARIO", "ORIGEM_EXIBICAO"]
-        mask = False
-        for c in cols_search:
-            if c in df.columns:
-                mask = mask | df[c].astype(str).str.lower().str.contains(q, na=False)
-        df = df[mask].copy()
-
-    # Ordenação
-    if "DATA" in df.columns:
-        df["DATA"] = pd.to_datetime(df["DATA"], errors="coerce")
-    df = df.sort_values(by=["DATA", "VALOR"], ascending=[True, True])
-
-    # ========================
-    # KPIs (sempre baseados no MASTER, não no filtro)
-    # ========================
-    master_resolved = div_master["RESOLVIDO"] | (div_master["STATUS"].str.lower().eq("resolvido"))
-    total_itens = int(len(div_master))
-    itens_res = int(master_resolved.sum())
+    resolved_mask = div_master["RESOLVIDO"] | (div_master["STATUS"].str.lower().eq("resolvido"))
+    total_itens = len(div_master)
+    itens_res = int(resolved_mask.sum())
     itens_ab = int(total_itens - itens_res)
-
-    # VALOR EM ABERTO = soma apenas dos não resolvidos (isso reduz na hora)
-    valor_aberto = float(div_master.loc[~master_resolved, "VALOR"].sum()) if total_itens else 0.0
+    valor_aberto = float(div_master.loc[~resolved_mask, "VALOR"].sum()) if total_itens else 0.0
     pct_res = (itens_res / total_itens * 100.0) if total_itens else 0.0
 
     st.markdown(
@@ -994,139 +1021,198 @@ else:
         unsafe_allow_html=True,
     )
 
-    # ========================
-    # Resumo para priorização (sem sobreposição)
-    # ========================
+    st.markdown('<div class="cm-section"></div>', unsafe_allow_html=True)
+
     with st.expander("Resumo para priorização (abertos, top impacto, pendências)", expanded=True):
-        # Base: apenas em aberto
-        abertos = div_master.loc[~master_resolved].copy()
-        abertos["DATA"] = pd.to_datetime(abertos["DATA"], errors="coerce")
-        abertos["ABS_VALOR"] = abertos["VALOR"].abs()
+        df_open = div_master.loc[~resolved_mask].copy()
+        df_open["ABS"] = df_open["VALOR"].abs()
 
-        top10 = abertos.sort_values("ABS_VALOR", ascending=False).head(10).copy()
-        top10_view = top10[["ORIGEM_EXIBICAO","DATA","DOCUMENTO","VALOR","NUCLEO_CONFIRMADO"]].copy()
-        top10_view["DATA"] = top10_view["DATA"].dt.strftime("%d/%m/%Y").fillna("")
+        top_open = df_open.sort_values("ABS", ascending=False).head(10)
 
-        # Pendências: sem núcleo (na prática sempre tem, mas deixo aqui se você quiser reativar depois)
-        sem_nucleo = int((abertos["NUCLEO_CONFIRMADO"].astype(str).str.strip() == "").sum())
+        left, right = st.columns([2.2, 1.0], gap="large")
 
-        # Distribuição por núcleo (abertos)
-        dist = abertos.groupby("NUCLEO_CONFIRMADO", dropna=False).agg(
-            Itens=("VALOR", "size"),
-            Valor=("VALOR", "sum")
-        ).reset_index().sort_values("Valor", ascending=False)
-
-        r1, r2 = st.columns([2.1, 1.2])
-        with r1:
+        with left:
             st.markdown("**Top 10 em aberto por impacto**")
-            st.dataframe(top10_view, use_container_width=True, height=260)
+            show_cols = ["ORIGEM", "DATA", "DOCUMENTO", "VALOR", "SEVERIDADE", "NUCLEO_CONFIRMADO"]
+            st.dataframe(top_open[show_cols].copy(), use_container_width=True, height=320)
 
-        with r2:
-            st.markdown("**Pendências**")
-            st.write(f"Itens em aberto sem Núcleo confirmado: **{sem_nucleo}**")
-            st.write("Atalhos:")
-            cqa, cqb = st.columns(2)
-            with cqa:
-                if st.button("Ver somente Crítica", use_container_width=True):
-                    st.session_state["_quick"] = "Somente Crítica"
-                    st.rerun()
-            with cqb:
-                if st.button("Ver Atenção + Crítica", use_container_width=True):
-                    st.session_state["_quick"] = "Atenção + Crítica"
-                    st.rerun()
+        with right:
+            st.markdown("**Sinais rápidos**")
+            st.markdown(origem_tag("Somente Financeiro"), unsafe_allow_html=True)
+            st.markdown(origem_tag("Somente Contábil"), unsafe_allow_html=True)
+            st.markdown(severidade_tag("Normal"), unsafe_allow_html=True)
+            st.markdown(severidade_tag("Atenção"), unsafe_allow_html=True)
+            st.markdown(severidade_tag("Crítica"), unsafe_allow_html=True)
 
-            st.markdown("**Distribuição por Núcleo (abertos)**")
-            st.dataframe(dist, use_container_width=True, height=180)
+        st.markdown("**Distribuição por Núcleo (abertos)**")
+        if len(df_open):
+            dist = df_open.copy()
+            dist["NUCLEO_CONFIRMADO"] = dist["NUCLEO_CONFIRMADO"].fillna("Não identificado").replace("", "Não identificado")
+            dist = dist.groupby("NUCLEO_CONFIRMADO", dropna=False).agg(
+                Itens=("VALOR","size"),
+                Valor=("VALOR","sum"),
+                Criticos=("SEVERIDADE", lambda s: int((s == "Crítica").sum()))
+            ).reset_index().sort_values("Valor", ascending=False)
+            st.dataframe(dist, use_container_width=True, height=220)
+        else:
+            st.info("Sem pendências em aberto.")
 
-    # aplicar atalho por botão (se existir)
-    if st.session_state.get("_quick"):
-        val = st.session_state["_quick"]
-        st.session_state["_quick"] = None
-        st.info(f"Atalho aplicado: {val}. Ajuste no seletor 'Atalho' se desejar manter.")
-        # não forço o selectbox pra não brigar com estado; só aviso
+    # ----------------
+    # Filtros
+    # ----------------
+    st.markdown("### Filtros")
+    f1, f2, f3, f4, f5 = st.columns([1.1, 1.05, 1.05, 2.3, 1.0], gap="large")
+    with f1:
+        origem = st.selectbox("Origem", ["Todas", "Somente Financeiro", "Somente Contábil"])
+    with f2:
+        ver = st.selectbox("Visualizar", ["Todas", "Somente em aberto", "Somente resolvidas"])
+    with f3:
+        sev = st.selectbox("Severidade", ["Todas", "Normal", "Atenção", "Crítica"])
+    with f4:
+        busca = st.text_input("Buscar (documento, histórico, chave, núcleo)", value="")
+    with f5:
+        st.markdown("<div style='height:1px'></div>", unsafe_allow_html=True)
 
-    # ========================
-    # Ações em massa (UX mais direto)
-    # ========================
-    st.markdown("### Ações em massa")
-    st.markdown('<div class="cm-help">Dica: use o filtro e aplique ação no que está na tela (ou por IDs).</div>', unsafe_allow_html=True)
+    df = div_master.copy()
 
-    scope = st.radio("Aplicar em:", ["Itens filtrados (tela atual)", "IDs informados"], horizontal=True)
+    if origem != "Todas":
+        df = df[df["ORIGEM"] == origem].copy()
 
-    # IDs que estão na tela (df é a tabela filtrada)
-    df_view_ids = list(df.index)
+    res_mask_df = df["RESOLVIDO"] | (df["STATUS"].astype(str).str.lower().eq("resolvido"))
+    if ver == "Somente em aberto":
+        df = df[~res_mask_df].copy()
+    elif ver == "Somente resolvidas":
+        df = df[res_mask_df].copy()
 
-    if scope == "Itens filtrados (tela atual)":
-        target_ids = df_view_ids
-        st.write(f"Selecionados: **{len(target_ids)}** itens (do filtro atual).")
-    else:
-        ids_txt = st.text_input("Informe os IDs separados por vírgula (ex: 1,2,15,18)")
-        target_ids = [int(x.strip()) for x in ids_txt.split(",") if x.strip().isdigit()]
-        st.write(f"Selecionados: **{len(target_ids)}** itens (por IDs).")
+    if sev != "Todas":
+        df = df[df["SEVERIDADE"] == sev].copy()
 
-    cA, cB, cC, cD = st.columns([1.2, 1.2, 1.4, 1.2])
-    with cA:
+    if busca.strip():
+        q = busca.strip().lower()
+        cols_search = ["DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "NUCLEO_CONFIRMADO", "SEVERIDADE", "NUCLEO_SUGERIDO", "MOTIVO_SUGERIDO"]
+        mask = False
+        for c in cols_search:
+            if c in df.columns:
+                mask = mask | df[c].astype(str).str.lower().str.contains(q, na=False)
+        df = df[mask].copy()
+
+    total_filtrado = float(df["VALOR"].sum()) if not df.empty else 0.0
+    with f5:
+        st.markdown(
+            f"""
+<div class="cm-mini">
+  <div class="k">Total do filtro</div>
+  <div class="v">{fmt(total_filtrado)}</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    if "DATA" in df.columns:
+        df["DATA"] = pd.to_datetime(df["DATA"], errors="coerce")
+    df = df.sort_values(by=["DATA", "VALOR"], ascending=[True, True])
+
+    # ----------------------------
+    # Ações em massa (sem Motivo Confirmado SN)
+    # ----------------------------
+    st.markdown("### Ações em massa (seleção / filtro)")
+    st.markdown('<div class="cm-help">Agora o motivo confirmado é automático: confirma Núcleo → motivo padrão é aplicado. Use OBS se precisar explicar o caso.</div>', unsafe_allow_html=True)
+
+    ids_filtrados = list(df.index)
+
+    m1, m2, m3 = st.columns([1.2, 1.2, 2.0], gap="large")
+    with m1:
+        if st.button("Selecionar todos do filtro"):
+            dm = st.session_state.div_master.copy()
+            dm.loc[ids_filtrados, "SELECIONADO"] = True
+            st.session_state.div_master = dm
+            st.rerun()
+    with m2:
+        if st.button("Limpar seleção do filtro"):
+            dm = st.session_state.div_master.copy()
+            dm.loc[ids_filtrados, "SELECIONADO"] = False
+            st.session_state.div_master = dm
+            st.rerun()
+    with m3:
+        scope = st.radio("Aplicar em:", ["Selecionados", "Todos do filtro"], horizontal=True)
+
+    dm0 = st.session_state.div_master.copy()
+    target_ids = list(dm0.index[dm0["SELECIONADO"].fillna(False)]) if scope == "Selecionados" else ids_filtrados
+
+    bA, bB, bC, bD = st.columns([1.4, 1.3, 1.5, 1.4], gap="large")
+    with bA:
         bulk_nucleo = st.selectbox("Núcleo confirmado", ["(não alterar)"] + NUCLEOS)
-    with cB:
-        bulk_status = st.selectbox("Status", ["(não alterar)"] + STATUS_OPTS)
-    with cC:
+    with bB:
         bulk_resolvido = st.selectbox("Marcar como Resolvido", ["(não alterar)", "Sim", "Não"])
-    with cD:
-        bulk_obs = st.text_input("Obs (aplicar / sobrescrever)", value="")
+    with bC:
+        bulk_status = st.selectbox("Status", ["(não alterar)"] + STATUS_OPTS)
+    with bD:
+        bulk_obs = st.text_input("OBS (opcional) para aplicar", value="")
 
-    if st.button("Aplicar nos selecionados", type="primary", disabled=(len(target_ids) == 0)):
+    if st.button("Aplicar nos itens alvo", type="primary", disabled=(len(target_ids) == 0)):
         dm = st.session_state.div_master.copy()
 
         if bulk_nucleo != "(não alterar)":
             dm.loc[target_ids, "NUCLEO_CONFIRMADO"] = bulk_nucleo
-            dm.loc[target_ids, "MOTIVO_CONFIRMADO"] = NUCLEO_MOTIVO.get(bulk_nucleo, NUCLEO_MOTIVO["Não identificado"])
+            dm.loc[target_ids, "MOTIVO_CONFIRMADO"] = dm.loc[target_ids, "NUCLEO_CONFIRMADO"].map(
+                lambda x: NUCLEO_TO_MOTIVO_PADRAO.get(str(x), "")
+            )
+
+        if bulk_obs.strip():
+            dm.loc[target_ids, "OBS_USUARIO"] = bulk_obs.strip()
 
         if bulk_status != "(não alterar)":
             dm.loc[target_ids, "STATUS"] = bulk_status
 
-        if bulk_obs.strip() != "":
-            dm.loc[target_ids, "OBS_USUARIO"] = bulk_obs.strip()
-
         if bulk_resolvido != "(não alterar)":
             if bulk_resolvido == "Sim":
-                nuc = dm.loc[target_ids, "NUCLEO_CONFIRMADO"].astype(str).str.strip()
-                bad = nuc.eq("") | nuc.isna()
-                if bad.any():
-                    st.error("Não foi possível marcar como Resolvido: há itens sem Núcleo confirmado. Defina o Núcleo e tente novamente.")
-                else:
+                nuc_ok = ~(dm.loc[target_ids, "NUCLEO_CONFIRMADO"].isna() |
+                           (dm.loc[target_ids, "NUCLEO_CONFIRMADO"].astype(str).str.strip() == ""))
+                if nuc_ok.all():
                     dm.loc[target_ids, "RESOLVIDO"] = True
                     dm.loc[target_ids, "STATUS"] = "Resolvido"
+                else:
+                    st.error("Não foi possível marcar como Resolvido: há itens sem Núcleo confirmado.")
             else:
                 dm.loc[target_ids, "RESOLVIDO"] = False
                 dm.loc[target_ids, "STATUS"] = dm.loc[target_ids, "STATUS"].replace({"Resolvido": "Pendente"})
+
+        dm.loc[target_ids, "SELECIONADO"] = False
+        dm["SEVERIDADE"] = dm["VALOR"].map(severidade)
 
         st.session_state.div_master = dm
         st.success(f"Ação aplicada em {len(target_ids)} itens.")
         st.rerun()
 
-    # ========================
-    # Tratativa (tabela)
-    # ========================
+    # ----------------
+    # Editor (tratativa) — removido MOTIVO_CONFIRMADO_SN
+    # ----------------
     st.markdown("### Tratativa (tabela)")
-    st.markdown('<div class="cm-help">Regra: para marcar como Resolvido, Núcleo deve estar preenchido.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cm-help">Agora é simples: confirme o Núcleo e, se precisar, preencha OBS. Ao marcar como Resolvido, Núcleo deve estar preenchido.</div>', unsafe_allow_html=True)
 
-    # Colunas de tela: ORIGEM_EXIBICAO com sinal embutido
     view_cols = [
-        "ORIGEM_EXIBICAO", "DATA", "DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "VALOR",
+        "SELECIONADO",
+        "ORIGEM", "SEVERIDADE", "DATA", "DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "VALOR",
+        "NUCLEO_SUGERIDO", "MOTIVO_SUGERIDO",
         "NUCLEO_CONFIRMADO", "MOTIVO_CONFIRMADO",
         "STATUS", "RESOLVIDO", "OBS_USUARIO"
     ]
     df_view = df[view_cols].copy()
+
     df_view_display = df_view.copy()
     df_view_display["DATA"] = pd.to_datetime(df_view_display["DATA"], errors="coerce").dt.strftime("%d/%m/%Y").fillna("")
 
     column_config = {
-        "ORIGEM_EXIBICAO": st.column_config.TextColumn("ORIGEM", disabled=True),
+        "SELECIONADO": st.column_config.CheckboxColumn(),
+        "ORIGEM": st.column_config.TextColumn(disabled=True),
+        "SEVERIDADE": st.column_config.TextColumn(disabled=True),
         "DATA": st.column_config.TextColumn(disabled=True),
         "DOCUMENTO": st.column_config.TextColumn(disabled=True),
         "HISTORICO_OPERACAO": st.column_config.TextColumn(disabled=True),
         "CHAVE_DOC": st.column_config.TextColumn(disabled=True),
         "VALOR": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
+        "NUCLEO_SUGERIDO": st.column_config.TextColumn(disabled=True),
+        "MOTIVO_SUGERIDO": st.column_config.TextColumn(disabled=True),
         "NUCLEO_CONFIRMADO": st.column_config.SelectboxColumn(options=NUCLEOS),
         "MOTIVO_CONFIRMADO": st.column_config.TextColumn(disabled=True),
         "STATUS": st.column_config.SelectboxColumn(options=STATUS_OPTS),
@@ -1137,52 +1223,54 @@ else:
     edited = st.data_editor(
         df_view_display,
         use_container_width=True,
-        height=420,
+        height=520,
         column_config=column_config,
         key="editor_tratativa",
         hide_index=False,
     )
 
-    # Aplicar mudanças (por ID = index)
+    # Aplicar mudanças
     if edited is not None and len(edited) == len(df_view_display):
         to_update = edited.copy()
-        dm = st.session_state.div_master.copy()
 
-        # Reaplicar motivo automaticamente quando mudar núcleo
-        if "NUCLEO_CONFIRMADO" in to_update.columns:
-            new_nuc = to_update["NUCLEO_CONFIRMADO"].astype(str)
-            dm.loc[to_update.index, "NUCLEO_CONFIRMADO"] = new_nuc.values
-            dm.loc[to_update.index, "MOTIVO_CONFIRMADO"] = new_nuc.map(lambda x: NUCLEO_MOTIVO.get(x, NUCLEO_MOTIVO["Não identificado"])).values
+        # Sempre recalcula motivo confirmado a partir do núcleo confirmado
+        to_update["NUCLEO_CONFIRMADO"] = to_update["NUCLEO_CONFIRMADO"].fillna("Não identificado").replace("", "Não identificado")
+        to_update["MOTIVO_CONFIRMADO"] = to_update["NUCLEO_CONFIRMADO"].map(lambda x: NUCLEO_TO_MOTIVO_PADRAO.get(str(x), ""))
 
-        # Status e Obs
-        dm.loc[to_update.index, "STATUS"] = to_update["STATUS"].values
-        dm.loc[to_update.index, "OBS_USUARIO"] = to_update["OBS_USUARIO"].values
-
-        # Coerência Resolvido
+        # Coerência: RESOLVIDO -> STATUS Resolvido
         res_col = to_update["RESOLVIDO"].fillna(False)
-        dm.loc[to_update.index, "RESOLVIDO"] = res_col.values
-        dm.loc[to_update.index[res_col], "STATUS"] = "Resolvido"
+        to_update.loc[res_col, "STATUS"] = "Resolvido"
 
-        # Regra: se RESOLVIDO=True, Núcleo obrigatório
-        nuc = dm.loc[to_update.index, "NUCLEO_CONFIRMADO"].astype(str).str.strip()
-        bad = res_col & (nuc.eq("") | nuc.isna())
+        # Regra: se RESOLVIDO=True, Núcleo confirmado obrigatório (apenas isso)
+        bad = res_col & (to_update["NUCLEO_CONFIRMADO"].isna() | (to_update["NUCLEO_CONFIRMADO"].astype(str).str.strip() == ""))
         if bad.any():
-            st.error("Para marcar como Resolvido, é obrigatório informar o Núcleo confirmado. Os itens inválidos foram desmarcados.")
-            dm.loc[to_update.index[bad], "RESOLVIDO"] = False
-            dm.loc[to_update.index[bad], "STATUS"] = "Pendente"
+            st.error("Para marcar como Resolvido, é obrigatório informar o Núcleo confirmado. Itens inválidos foram desmarcados.")
+            to_update.loc[bad, "RESOLVIDO"] = False
+            to_update.loc[bad, "STATUS"] = "Pendente"
 
+        upd_cols = ["SELECIONADO", "NUCLEO_CONFIRMADO", "MOTIVO_CONFIRMADO", "STATUS", "RESOLVIDO", "OBS_USUARIO"]
+        dm = st.session_state.div_master.copy()
+        for c in upd_cols:
+            dm.loc[to_update.index, c] = to_update[c].values
+
+        dm["SEVERIDADE"] = dm["VALOR"].map(severidade)
         st.session_state.div_master = dm
-        st.rerun()
+        div_master = dm.copy()
 
-    # ========================
+    # ----------------
     # Detalhe do item
-    # ========================
+    # ----------------
     st.markdown("### Detalhe do item")
-    pick_id = st.number_input("Digite o ID do item para ver detalhes", min_value=1, max_value=max(1, int(div_master.index.max())), value=1, step=1)
-
-    div_master = st.session_state.div_master.copy()
-    if pick_id in div_master.index:
-        r = div_master.loc[pick_id]
+    pick_id = st.number_input(
+        "Digite o ID do item para ver detalhes",
+        min_value=1,
+        max_value=max(1, int(st.session_state.div_master.index.max())),
+        value=1,
+        step=1
+    )
+    dm_now = st.session_state.div_master
+    if pick_id in dm_now.index:
+        r = dm_now.loc[pick_id]
         dt_txt = ""
         try:
             if pd.notna(r.get("DATA")):
@@ -1192,11 +1280,14 @@ else:
 
         resumo = (
             f"ID: {pick_id}\n"
-            f"ORIGEM: {r.get('ORIGEM_EXIBICAO','')}\n"
+            f"ORIGEM: {r.get('ORIGEM','')}\n"
+            f"SEVERIDADE: {r.get('SEVERIDADE','')}\n"
             f"DATA: {dt_txt}\n"
             f"DOCUMENTO: {r.get('DOCUMENTO','')}\n"
             f"CHAVE: {r.get('CHAVE_DOC','')}\n"
             f"VALOR: {fmt(r.get('VALOR', np.nan))}\n"
+            f"NUCLEO_SUGERIDO: {r.get('NUCLEO_SUGERIDO','')}\n"
+            f"MOTIVO_SUGERIDO: {r.get('MOTIVO_SUGERIDO','')}\n"
             f"NUCLEO_CONFIRMADO: {r.get('NUCLEO_CONFIRMADO','')}\n"
             f"MOTIVO_CONFIRMADO: {r.get('MOTIVO_CONFIRMADO','')}\n"
             f"STATUS: {r.get('STATUS','')}\n"
@@ -1209,58 +1300,62 @@ else:
             f"""
 <div class="cm-detail">
   <div class="title">Item #{pick_id}</div>
-  <div class="row"><span class="label">Origem:</span> <span class="val">{r.get('ORIGEM_EXIBICAO','')}</span></div>
+  <div class="row"><span class="label">Origem:</span> <span class="val">{r.get('ORIGEM','')}</span></div>
+  <div class="row"><span class="label">Severidade:</span> <span class="val">{r.get('SEVERIDADE','')}</span></div>
   <div class="row"><span class="label">Data:</span> <span class="val">{dt_txt}</span></div>
   <div class="row"><span class="label">Documento:</span> <span class="val">{r.get('DOCUMENTO','')}</span></div>
   <div class="row"><span class="label">Valor:</span> <span class="val">{fmt(r.get('VALOR', np.nan))}</span></div>
-  <div class="row"><span class="label">Núcleo:</span> <span class="val">{r.get('NUCLEO_CONFIRMADO','')}</span></div>
+  <div class="row"><span class="label">Núcleo confirmado:</span> <span class="val">{r.get('NUCLEO_CONFIRMADO','')}</span></div>
+  <div class="row"><span class="label">Motivo confirmado:</span> <span class="val">{r.get('MOTIVO_CONFIRMADO','')}</span></div>
   <div class="row"><span class="label">Status:</span> <span class="val">{r.get('STATUS','')}</span></div>
 </div>
 """,
             unsafe_allow_html=True,
         )
-        st.text_area("Copiar resumo (e-mail/ticket)", value=resumo, height=160)
+        st.text_area("Copiar resumo (e-mail/ticket)", value=resumo, height=190)
 
-    # ========================
+    # ----------------
     # Export
-    # ========================
+    # ----------------
     st.markdown("### Exportar")
-    filtros = {"origem": origem, "ver": ver, "busca": busca.strip()}
+    filtros = {"origem": origem, "ver": ver, "severidade": sev, "busca": busca.strip()}
 
-    # Exporta exatamente o que está na tela (df_view é filtrado)
     excel_bytes = to_excel_divergencias_filtradas(
-        df_filtrado=df_view,
+        df_filtrado=df_view.drop(columns=["SELECIONADO"]).copy(),
         total_filtrado=float(df_view["VALOR"].sum()) if len(df_view) else 0.0,
-        total_aberto=float(div_master.loc[~(div_master["RESOLVIDO"] | (div_master["STATUS"].str.lower().eq("resolvido"))), "VALOR"].sum()) if len(div_master) else 0.0,
+        total_aberto=valor_aberto,
         filtros=filtros,
         stats=stats,
         generated_at=generated_at
     )
-
-    st.download_button(
-        "Baixar Divergências (Excel) — exatamente como filtrado",
-        data=excel_bytes,
-        file_name=f"ConciliaMais_DivergenciasFiltradas_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
     pdf_bytes = to_pdf_resumo(stats, generated_at, st.session_state.div_master)
-    st.download_button(
-        "Baixar Relatório Resumo (PDF) — executivo",
-        data=pdf_bytes,
-        file_name=f"ConciliaMais_Resumo_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-        mime="application/pdf",
-    )
 
-    st.markdown("---")
-    cback, creset = st.columns([1, 2])
-    with cback:
-        if st.button("Voltar para Upload"):
+    exA, exB, exC, exD = st.columns([1.9, 1.9, 1.2, 1.2], gap="large")
+    with exA:
+        st.download_button(
+            "Baixar Divergências (Excel) — como filtrado",
+            data=excel_bytes,
+            file_name=f"ConciliaMais_DivergenciasFiltradas_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+    with exB:
+        st.download_button(
+            "Baixar Relatório Resumo (PDF) — executivo",
+            data=pdf_bytes,
+            file_name=f"ConciliaMais_Resumo_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+    with exC:
+        if st.button("Voltar para Upload", use_container_width=True):
             st.session_state.page = "upload"
+            st.session_state.upload_step = 1
             st.rerun()
-    with creset:
-        if st.button("Limpar resultado e recomeçar"):
+    with exD:
+        if st.button("Limpar e recomeçar", use_container_width=True):
             st.session_state.results = None
             st.session_state.div_master = None
             st.session_state.page = "upload"
+            st.session_state.upload_step = 1
             st.rerun()
