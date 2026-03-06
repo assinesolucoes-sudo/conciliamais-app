@@ -5,6 +5,7 @@ import re
 import json
 import os
 import unicodedata
+import hashlib
 from io import BytesIO
 from datetime import datetime
 
@@ -20,9 +21,10 @@ from reportlab.lib import colors
 st.set_page_config(page_title="ConciliaMais — Conferência de Extrato Bancário", layout="wide")
 
 RULES_FILE = "regras.json"
+LEARNING_FILE = "aprendizado.json"
 
 # =========================================================
-# CSS (Dark + Marca Azul)
+# CSS
 # =========================================================
 st.markdown(
     """
@@ -151,7 +153,89 @@ div.stButton > button[kind="primary"]:hover{
 )
 
 # =========================================================
-# Regras / Persistência
+# Constantes
+# =========================================================
+NUCLEOS = ["Processo interno", "Cadastro", "Configuração RP", "Não identificado"]
+STATUS_OPTS = ["Pendente", "Em análise", "Resolvido"]
+SEVERIDADES = ["Normal", "Atenção", "Crítica"]
+ORIGEM_RULE_OPTS = ["Qualquer", "Somente Financeiro", "Somente Contábil"]
+
+# =========================================================
+# Helpers gerais
+# =========================================================
+def set_flash(kind, msg):
+    st.session_state["_flash"] = {"kind": kind, "msg": msg}
+
+def show_flash():
+    flash = st.session_state.pop("_flash", None)
+    if flash:
+        if flash["kind"] == "success":
+            st.success(flash["msg"])
+        elif flash["kind"] == "warning":
+            st.warning(flash["msg"])
+        elif flash["kind"] == "error":
+            st.error(flash["msg"])
+        else:
+            st.info(flash["msg"])
+
+def safe_float(x, default=None):
+    try:
+        if pd.isna(x):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+def strip_accents(text):
+    if text is None:
+        return ""
+    text = str(text)
+    return "".join(ch for ch in unicodedata.normalize("NFD", text) if unicodedata.category(ch) != "Mn")
+
+def normalize_text_rule(text):
+    text = strip_accents(str(text).lower().strip())
+    text = re.sub(r"\b\d{6,}\b", " ", text)
+    text = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", " ", text)
+    text = re.sub(r"\b\d+\b", " ", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+def normalize_money(x):
+    if pd.isna(x):
+        return np.nan
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        return float(x)
+    s = str(x).strip()
+    if s == "":
+        return np.nan
+    s = s.replace("R$", "").strip()
+    s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+
+def fmt(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "-"
+    try:
+        return f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(v)
+
+def pill_calculo(conferencia):
+    if conferencia is None or (isinstance(conferencia, float) and np.isnan(conferencia)):
+        return '<span class="cm-pill cm-warn">Não calculada</span>'
+    x = abs(float(conferencia))
+    if x <= 0.01:
+        return '<span class="cm-pill cm-ok">Consistente (0,00)</span>'
+    if x <= 5:
+        return '<span class="cm-pill cm-warn">Quase (verificar)</span>'
+    return '<span class="cm-pill cm-bad">Inconsistente</span>'
+
+# =========================================================
+# Persistência de regras
 # =========================================================
 def default_rules_payload():
     return {"nucleo_rules": [], "criticidade_rules": []}
@@ -187,32 +271,216 @@ def next_rule_id(rules):
             pass
     return (max(used) + 1) if used else 1
 
+def normalize_rule_origin(origem):
+    origem = str(origem or "").strip()
+    if origem == "" or origem.lower() == "qualquer":
+        return "Qualquer"
+    return origem
+
+def rule_signature(rule):
+    parts = [
+        normalize_rule_origin(rule.get("origem", "Qualquer")),
+        normalize_text_rule(rule.get("texto_contem", "")),
+        str(rule.get("regex", "")).strip().lower(),
+        str(rule.get("documento_prefixo", "")).strip().upper(),
+        str(rule.get("resultado", "")).strip().lower(),
+        str(rule.get("valor_min", "")).strip(),
+        str(rule.get("valor_max", "")).strip(),
+        str(rule.get("nome", "")).strip().lower(),
+    ]
+    return "||".join(parts)
+
 def add_rule(rule_type, rule_dict):
     payload = load_rules()
     bucket = "nucleo_rules" if rule_type == "nucleo" else "criticidade_rules"
+
     rule_dict = dict(rule_dict)
+    rule_dict["origem"] = normalize_rule_origin(rule_dict.get("origem", "Qualquer"))
+
+    new_sig = rule_signature(rule_dict)
+    for r in payload[bucket]:
+        if rule_signature(r) == new_sig:
+            return False, "Já existe uma regra semelhante cadastrada."
+
     rule_dict["id"] = next_rule_id(payload[bucket])
     payload[bucket].append(rule_dict)
     payload[bucket] = sorted(payload[bucket], key=lambda x: (int(x.get("prioridade", 9999)), int(x.get("id", 0))))
     save_rules(payload)
+    return True, f'Regra "{rule_dict.get("nome", "")}" criada com sucesso.'
 
 def update_rule_status(rule_type, rule_id, active):
     payload = load_rules()
     bucket = "nucleo_rules" if rule_type == "nucleo" else "criticidade_rules"
+    found = False
     for r in payload[bucket]:
         if int(r.get("id", 0)) == int(rule_id):
             r["ativa"] = bool(active)
+            found = True
             break
-    save_rules(payload)
+    if found:
+        save_rules(payload)
+        return True
+    return False
 
 def delete_rule(rule_type, rule_id):
     payload = load_rules()
     bucket = "nucleo_rules" if rule_type == "nucleo" else "criticidade_rules"
+    old_len = len(payload[bucket])
     payload[bucket] = [r for r in payload[bucket] if int(r.get("id", 0)) != int(rule_id)]
-    save_rules(payload)
+    if len(payload[bucket]) != old_len:
+        save_rules(payload)
+        return True
+    return False
 
 # =========================================================
-# Helpers (motor)
+# Persistência de aprendizado
+# =========================================================
+def default_learning_payload():
+    return {"examples": []}
+
+def load_learning():
+    if not os.path.exists(LEARNING_FILE):
+        payload = default_learning_payload()
+        save_learning(payload)
+        return payload
+    try:
+        with open(LEARNING_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = default_learning_payload()
+        data.setdefault("examples", [])
+        return data
+    except Exception:
+        payload = default_learning_payload()
+        save_learning(payload)
+        return payload
+
+def save_learning(payload):
+    with open(LEARNING_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+def learning_signature(row):
+    base = "||".join([
+        str(row.get("ORIGEM", "")),
+        str(row.get("MOTIVO_BASE", "")),
+        str(row.get("NUCLEO", "")),
+        str(row.get("SEVERIDADE", "")),
+        str(row.get("HISTORICO_OPERACAO", ""))[:120],
+    ])
+    return hashlib.md5(base.encode("utf-8")).hexdigest()
+
+def save_learning_examples(df):
+    payload = load_learning()
+    existing = {x.get("sig") for x in payload["examples"]}
+
+    to_save = []
+    for _, r in df.iterrows():
+        nuc_final = str(r.get("NUCLEO", "")).strip()
+        confirmado = bool(r.get("CONFIRMADO", False))
+        if not confirmado:
+            continue
+        if nuc_final == "" or nuc_final == "Não identificado":
+            continue
+
+        sig = learning_signature(r)
+        if sig in existing:
+            continue
+
+        to_save.append({
+            "sig": sig,
+            "origem": str(r.get("ORIGEM", "")),
+            "motivo_base": str(r.get("MOTIVO_BASE", "")),
+            "historico_operacao": str(r.get("HISTORICO_OPERACAO", "")),
+            "documento": str(r.get("DOCUMENTO", "")),
+            "valor": safe_float(r.get("VALOR", np.nan), 0.0),
+            "nucleo_sugerido": str(r.get("NUCLEO_SUGERIDO", "")),
+            "nucleo_final": nuc_final,
+            "severidade_final": str(r.get("SEVERIDADE", "")),
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+    if to_save:
+        payload["examples"].extend(to_save)
+        save_learning(payload)
+
+def build_learning_suggestions(div_master):
+    learning = load_learning().get("examples", [])
+    rows = []
+
+    for ex in learning:
+        motivo = str(ex.get("motivo_base", "")).strip()
+        origem = str(ex.get("origem", "")).strip()
+        nucleo_final = str(ex.get("nucleo_final", "")).strip()
+        if motivo and nucleo_final and nucleo_final != "Não identificado":
+            rows.append({
+                "ORIGEM": origem,
+                "MOTIVO_BASE": motivo,
+                "NUCLEO_FINAL": nucleo_final,
+                "VALOR": safe_float(ex.get("valor", 0.0), 0.0),
+                "FONTE": "Aprendizado",
+            })
+
+    df = div_master.copy()
+    if len(df):
+        cand = df.copy()
+        cand["NUCLEO"] = cand["NUCLEO"].fillna("Não identificado")
+        cand["CONFIRMADO"] = cand["CONFIRMADO"].fillna(False)
+        cand = cand[cand["CONFIRMADO"]].copy()
+        cand = cand[cand["NUCLEO"].ne("Não identificado")].copy()
+        cand = cand[cand["MOTIVO_BASE"].astype(str).str.strip().ne("")].copy()
+
+        for _, r in cand.iterrows():
+            rows.append({
+                "ORIGEM": str(r.get("ORIGEM", "")),
+                "MOTIVO_BASE": str(r.get("MOTIVO_BASE", "")),
+                "NUCLEO_FINAL": str(r.get("NUCLEO", "")),
+                "VALOR": abs(safe_float(r.get("VALOR", 0.0), 0.0)),
+                "FONTE": "Sessão atual",
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
+    sug = pd.DataFrame(rows)
+    sug["ABS_VALOR"] = sug["VALOR"].abs()
+
+    out = (
+        sug.groupby(["ORIGEM", "MOTIVO_BASE", "NUCLEO_FINAL"], dropna=False)
+        .agg(
+            Qtd=("MOTIVO_BASE", "size"),
+            Impacto=("VALOR", "sum"),
+            Maior_Valor=("ABS_VALOR", "max")
+        )
+        .reset_index()
+    )
+
+    payload = load_rules()
+    current_rules = payload.get("nucleo_rules", [])
+
+    def exists_rule(row):
+        motivo = str(row["MOTIVO_BASE"]).strip()
+        origem = str(row["ORIGEM"]).strip()
+        resultado = str(row["NUCLEO_FINAL"]).strip()
+
+        for rr in current_rules:
+            rr_origem = normalize_rule_origin(rr.get("origem", "Qualquer"))
+            rr_texto = normalize_text_rule(rr.get("texto_contem", ""))
+            rr_result = str(rr.get("resultado", "")).strip()
+
+            origem_ok = rr_origem == "Qualquer" or rr_origem == origem
+            texto_ok = rr_texto == normalize_text_rule(motivo)
+            resultado_ok = rr_result == resultado
+            if origem_ok and texto_ok and resultado_ok:
+                return True
+        return False
+
+    out["JA_EXISTE"] = out.apply(exists_rule, axis=1)
+    out = out[~out["JA_EXISTE"]].copy()
+    out = out.sort_values(["Qtd", "Maior_Valor"], ascending=[False, False])
+    return out
+
+# =========================================================
+# Leitura / motor base
 # =========================================================
 def _to_date_series(s):
     out = pd.to_datetime(s, errors="coerce", dayfirst=True)
@@ -229,21 +497,6 @@ def extract_doc_key(text):
         nums = sorted(nums, key=lambda x: (len(x), t.rfind(x)))
         return nums[-1]
     return ""
-
-def normalize_money(x):
-    if pd.isna(x):
-        return np.nan
-    if isinstance(x, (int, float, np.integer, np.floating)):
-        return float(x)
-    s = str(x).strip()
-    if s == "":
-        return np.nan
-    s = s.replace("R$", "").strip()
-    s = s.replace(".", "").replace(",", ".")
-    try:
-        return float(s)
-    except Exception:
-        return np.nan
 
 def read_table(uploaded):
     name = uploaded.name.lower()
@@ -374,24 +627,6 @@ def compute_saldo_final(df_norm):
     r = dfv.iloc[-1]
     return round(float(r["__saldo"]), 2)
 
-def fmt(v):
-    if v is None or (isinstance(v, float) and np.isnan(v)):
-        return "-"
-    try:
-        return f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return str(v)
-
-def pill_calculo(conferencia):
-    if conferencia is None or (isinstance(conferencia, float) and np.isnan(conferencia)):
-        return '<span class="cm-pill cm-warn">Não calculada</span>'
-    x = abs(float(conferencia))
-    if x <= 0.01:
-        return '<span class="cm-pill cm-ok">Consistente (0,00)</span>'
-    if x <= 5:
-        return '<span class="cm-pill cm-warn">Quase (verificar)</span>'
-    return '<span class="cm-pill cm-bad">Inconsistente</span>'
-
 def extract_doc_from_ledger_history(x):
     if pd.isna(x):
         return ""
@@ -410,10 +645,6 @@ def extract_doc_from_ledger_history(x):
 # =========================================================
 # Núcleo / Severidade base
 # =========================================================
-NUCLEOS = ["Processo interno", "Cadastro", "Configuração RP", "Não identificado"]
-STATUS_OPTS = ["Pendente", "Em análise", "Resolvido"]
-SEVERIDADES = ["Normal", "Atenção", "Crítica"]
-
 def suggest_nucleo_base(row):
     origem = str(row.get("ORIGEM", "")).lower()
     hist = str(row.get("HISTORICO_OPERACAO", "")).lower()
@@ -433,7 +664,7 @@ def suggest_nucleo_base(row):
 
     return "Não identificado"
 
-def severidade_base(valor) -> str:
+def severidade_base(valor):
     try:
         v = abs(float(valor))
     except Exception:
@@ -445,23 +676,8 @@ def severidade_base(valor) -> str:
     return "Crítica"
 
 # =========================================================
-# Motivo base / Regras
+# Motivo base / regras
 # =========================================================
-def strip_accents(text):
-    if text is None:
-        return ""
-    text = str(text)
-    return "".join(ch for ch in unicodedata.normalize("NFD", text) if unicodedata.category(ch) != "Mn")
-
-def normalize_text_rule(text):
-    text = strip_accents(str(text).lower().strip())
-    text = re.sub(r"\b\d{6,}\b", " ", text)
-    text = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", " ", text)
-    text = re.sub(r"\b\d+\b", " ", text)
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
 STOPWORDS_MOTIVO = {
     "de", "da", "do", "das", "dos", "para", "por", "com", "sem", "na", "no",
     "em", "a", "o", "e", "ou", "um", "uma", "ao", "aos", "as", "os"
@@ -472,14 +688,6 @@ def build_motivo_base(text):
     toks = [t for t in txt.split() if t not in STOPWORDS_MOTIVO]
     toks = toks[:8]
     return " ".join(toks).strip()
-
-def safe_float(x, default=None):
-    try:
-        if pd.isna(x):
-            return default
-        return float(x)
-    except Exception:
-        return default
 
 def match_rule_value(valor, vmin, vmax):
     v = safe_float(valor, None)
@@ -509,13 +717,14 @@ def rule_matches(row, rule):
     hist_norm = normalize_text_rule(hist)
     doc_norm = normalize_text_rule(documento)
 
-    rule_origem = str(rule.get("origem", "")).strip()
-    if rule_origem and rule_origem != origem:
+    rule_origem = normalize_rule_origin(rule.get("origem", "Qualquer"))
+    if rule_origem not in ["", "Qualquer"] and rule_origem != origem:
         return False
 
     texto_contem = str(rule.get("texto_contem", "")).strip()
     if texto_contem:
-        if normalize_text_rule(texto_contem) not in hist_norm and normalize_text_rule(texto_contem) not in doc_norm:
+        tnorm = normalize_text_rule(texto_contem)
+        if tnorm not in hist_norm and tnorm not in doc_norm:
             return False
 
     regex = str(rule.get("regex", "")).strip()
@@ -543,7 +752,7 @@ def apply_rules_to_row(row, rules, default_value):
     rules_sorted = sorted(rules, key=lambda x: (int(x.get("prioridade", 9999)), int(x.get("id", 0))))
     for rule in rules_sorted:
         if rule_matches(row, rule):
-            return rule.get("resultado", default_value), f"Regra #{rule.get('id')} - {rule.get('nome', '')}"
+            return rule.get("resultado", default_value), f'Regra #{rule.get("id")} - {rule.get("nome", "")}'
     return default_value, "Base"
 
 def apply_classification_rules(df):
@@ -709,7 +918,7 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     return div, stats
 
 # =========================================================
-# Excel Export
+# Excel Export (limpo)
 # =========================================================
 def _autofit_worksheet(ws, df, start_col, max_width=70, min_width=10):
     for j, col in enumerate(df.columns):
@@ -748,7 +957,7 @@ def to_excel_divergencias_filtradas(df_filtrado, filtros, stats, generated_at):
         ws = wb.add_worksheet(sh)
         w.sheets[sh] = ws
 
-        ws.write(0, 0, "ConciliaMais — Divergências (Excel igual à tela)", fmt_title)
+        ws.write(0, 0, "ConciliaMais — Divergências Tratadas", fmt_title)
         ws.write(1, 0, "Processado em:", fmt_k)
         ws.write(1, 1, generated_at, fmt_info)
 
@@ -978,7 +1187,7 @@ if "upload_step" not in st.session_state:
     st.session_state.upload_step = 1
 
 # =========================================================
-# Sidebar Navegação
+# Sidebar
 # =========================================================
 with st.sidebar:
     st.markdown("## Navegação")
@@ -996,12 +1205,13 @@ if mod != "Financeiro" or area != "Extrato Bancário":
     st.stop()
 
 # =========================================================
-# Página: Upload
+# Upload
 # =========================================================
 if st.session_state.page == "upload":
     st.title("ConciliaMais — Conferência de Extrato Bancário")
     st.markdown('<div class="cm-breadcrumb">Financeiro  ›  Extrato Bancário</div>', unsafe_allow_html=True)
     st.caption("Extrato Financeiro + Razão Contábil → Match automático → Divergências → Tratativa")
+    show_flash()
 
     st.markdown("### Etapas")
     steps = ["1) Upload", "2) Mapeamento", "3) Validação", "4) Processar"]
@@ -1122,7 +1332,7 @@ if st.session_state.page == "upload":
     date_tol = st.number_input("Tolerância de dias para match por data (0 = mesma data)", min_value=0, max_value=10, value=0, step=1)
 
     st.session_state.upload_step = 4
-    st.markdown('<div class="cm-help">Ao processar, o sistema gera divergências e habilita tratativa (Confirmado, Status, Observação).</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cm-help">Ao processar, o sistema gera divergências e habilita tratativa.</div>', unsafe_allow_html=True)
 
     with st.form("form_processar", clear_on_submit=False):
         colb1, colb2 = st.columns([1.2, 2.0])
@@ -1181,7 +1391,7 @@ if st.session_state.page == "upload":
         st.rerun()
 
 # =========================================================
-# Página: Resultados
+# Resultados
 # =========================================================
 else:
     if not st.session_state.results or st.session_state.div_master is None:
@@ -1202,6 +1412,8 @@ else:
             st.session_state.upload_step = 1
             st.rerun()
 
+    show_flash()
+
     div_master = st.session_state.div_master.copy()
     div_master["VALOR"] = div_master["VALOR"].map(normalize_money)
     div_master["RESOLVIDO"] = div_master["RESOLVIDO"].fillna(False)
@@ -1211,7 +1423,10 @@ else:
     div_master["MOTIVO_BASE"] = div_master.get("MOTIVO_BASE", div_master["HISTORICO_OPERACAO"].map(build_motivo_base))
 
     if "NUCLEO_SUGERIDO" in div_master.columns:
-        need = div_master["CONFIRMADO"] & (div_master["NUCLEO"].astype(str).str.strip().eq("") | div_master["NUCLEO"].eq("Não identificado"))
+        need = div_master["CONFIRMADO"] & (
+            div_master["NUCLEO"].astype(str).str.strip().eq("") |
+            div_master["NUCLEO"].eq("Não identificado")
+        )
         div_master.loc[need, "NUCLEO"] = div_master.loc[need, "NUCLEO_SUGERIDO"].fillna("Não identificado")
 
     div_master.loc[div_master["RESOLVIDO"], "STATUS"] = "Resolvido"
@@ -1267,73 +1482,85 @@ else:
         payload = load_rules()
 
         st.markdown("#### Criar regra de Núcleo")
-        c1, c2, c3 = st.columns([1.4, 1.0, 1.0])
-        with c1:
-            nr_nome = st.text_input("Nome da regra (núcleo)", key="nr_nome")
-            nr_texto = st.text_input("Texto contém", key="nr_texto")
-            nr_regex = st.text_input("Regex (opcional)", key="nr_regex")
-            nr_doc_pref = st.text_input("Prefixo do documento (opcional)", key="nr_doc_pref")
-        with c2:
-            nr_origem = st.selectbox("Origem", ["", "Somente Financeiro", "Somente Contábil"], key="nr_origem")
-            nr_valor_min = st.text_input("Valor mínimo abs", key="nr_valor_min")
-            nr_valor_max = st.text_input("Valor máximo abs", key="nr_valor_max")
-        with c3:
-            nr_resultado = st.selectbox("Resultado", NUCLEOS, key="nr_resultado")
-            nr_prioridade = st.number_input("Prioridade", min_value=1, value=100, step=1, key="nr_prioridade")
-            nr_ativa = st.checkbox("Ativa", value=True, key="nr_ativa")
-            if st.button("Salvar regra de Núcleo", type="primary"):
-                add_rule("nucleo", {
-                    "nome": nr_nome.strip() or f"Núcleo {nr_resultado}",
-                    "prioridade": int(nr_prioridade),
-                    "ativa": bool(nr_ativa),
-                    "origem": nr_origem.strip(),
-                    "texto_contem": nr_texto.strip(),
-                    "regex": nr_regex.strip(),
-                    "documento_prefixo": nr_doc_pref.strip(),
-                    "valor_min": nr_valor_min.strip(),
-                    "valor_max": nr_valor_max.strip(),
-                    "resultado": nr_resultado,
-                })
+        with st.form("form_regra_nucleo", clear_on_submit=True):
+            c1, c2, c3 = st.columns([1.4, 1.0, 1.0])
+            with c1:
+                nr_nome = st.text_input("Nome da regra (núcleo)")
+                nr_texto = st.text_input("Texto contém")
+                nr_regex = st.text_input("Regex (opcional)")
+                nr_doc_pref = st.text_input("Prefixo do documento (opcional)")
+            with c2:
+                nr_origem = st.selectbox("Origem", ORIGEM_RULE_OPTS, index=0)
+                nr_valor_min = st.text_input("Valor mínimo abs")
+                nr_valor_max = st.text_input("Valor máximo abs")
+            with c3:
+                nr_resultado = st.selectbox("Resultado", NUCLEOS)
+                nr_prioridade = st.number_input("Prioridade", min_value=1, value=100, step=1)
+                nr_ativa = st.checkbox("Ativa", value=True)
+                salvar_nucleo = st.form_submit_button("Salvar regra de Núcleo", type="primary")
+
+        if salvar_nucleo:
+            ok, msg = add_rule("nucleo", {
+                "nome": nr_nome.strip() or f"Núcleo {nr_resultado}",
+                "prioridade": int(nr_prioridade),
+                "ativa": bool(nr_ativa),
+                "origem": nr_origem,
+                "texto_contem": nr_texto.strip(),
+                "regex": nr_regex.strip(),
+                "documento_prefixo": nr_doc_pref.strip(),
+                "valor_min": nr_valor_min.strip(),
+                "valor_max": nr_valor_max.strip(),
+                "resultado": nr_resultado,
+            })
+            if ok:
                 dm = st.session_state.div_master.copy()
                 dm = apply_classification_rules(dm)
                 st.session_state.div_master = dm
-                st.success("Regra de núcleo salva.")
-                st.rerun()
+                set_flash("success", msg)
+            else:
+                set_flash("warning", msg)
+            st.rerun()
 
         st.markdown("---")
         st.markdown("#### Criar regra de Criticidade")
-        d1, d2, d3 = st.columns([1.4, 1.0, 1.0])
-        with d1:
-            cr_nome = st.text_input("Nome da regra (criticidade)", key="cr_nome")
-            cr_texto = st.text_input("Texto contém", key="cr_texto")
-            cr_regex = st.text_input("Regex (opcional)", key="cr_regex")
-            cr_doc_pref = st.text_input("Prefixo do documento (opcional)", key="cr_doc_pref")
-        with d2:
-            cr_origem = st.selectbox("Origem ", ["", "Somente Financeiro", "Somente Contábil"], key="cr_origem")
-            cr_valor_min = st.text_input("Valor mínimo abs ", key="cr_valor_min")
-            cr_valor_max = st.text_input("Valor máximo abs ", key="cr_valor_max")
-        with d3:
-            cr_resultado = st.selectbox("Resultado ", SEVERIDADES, key="cr_resultado")
-            cr_prioridade = st.number_input("Prioridade ", min_value=1, value=100, step=1, key="cr_prioridade")
-            cr_ativa = st.checkbox("Ativa ", value=True, key="cr_ativa")
-            if st.button("Salvar regra de Criticidade", type="primary"):
-                add_rule("criticidade", {
-                    "nome": cr_nome.strip() or f"Criticidade {cr_resultado}",
-                    "prioridade": int(cr_prioridade),
-                    "ativa": bool(cr_ativa),
-                    "origem": cr_origem.strip(),
-                    "texto_contem": cr_texto.strip(),
-                    "regex": cr_regex.strip(),
-                    "documento_prefixo": cr_doc_pref.strip(),
-                    "valor_min": cr_valor_min.strip(),
-                    "valor_max": cr_valor_max.strip(),
-                    "resultado": cr_resultado,
-                })
+        with st.form("form_regra_criticidade", clear_on_submit=True):
+            d1, d2, d3 = st.columns([1.4, 1.0, 1.0])
+            with d1:
+                cr_nome = st.text_input("Nome da regra (criticidade)")
+                cr_texto = st.text_input("Texto contém ")
+                cr_regex = st.text_input("Regex (opcional) ")
+                cr_doc_pref = st.text_input("Prefixo do documento (opcional) ")
+            with d2:
+                cr_origem = st.selectbox("Origem ", ORIGEM_RULE_OPTS, index=0)
+                cr_valor_min = st.text_input("Valor mínimo abs ")
+                cr_valor_max = st.text_input("Valor máximo abs ")
+            with d3:
+                cr_resultado = st.selectbox("Resultado ", SEVERIDADES)
+                cr_prioridade = st.number_input("Prioridade ", min_value=1, value=100, step=1)
+                cr_ativa = st.checkbox("Ativa ", value=True)
+                salvar_criticidade = st.form_submit_button("Salvar regra de Criticidade", type="primary")
+
+        if salvar_criticidade:
+            ok, msg = add_rule("criticidade", {
+                "nome": cr_nome.strip() or f"Criticidade {cr_resultado}",
+                "prioridade": int(cr_prioridade),
+                "ativa": bool(cr_ativa),
+                "origem": cr_origem,
+                "texto_contem": cr_texto.strip(),
+                "regex": cr_regex.strip(),
+                "documento_prefixo": cr_doc_pref.strip(),
+                "valor_min": cr_valor_min.strip(),
+                "valor_max": cr_valor_max.strip(),
+                "resultado": cr_resultado,
+            })
+            if ok:
                 dm = st.session_state.div_master.copy()
                 dm = apply_classification_rules(dm)
                 st.session_state.div_master = dm
-                st.success("Regra de criticidade salva.")
-                st.rerun()
+                set_flash("success", msg)
+            else:
+                set_flash("warning", msg)
+            st.rerun()
 
         st.markdown("---")
         st.markdown("#### Regras cadastradas")
@@ -1350,15 +1577,33 @@ else:
             colx1, colx2, colx3 = st.columns(3)
             with colx1:
                 if st.button("Ativar regra núcleo"):
-                    update_rule_status("nucleo", rid, True)
+                    if update_rule_status("nucleo", rid, True):
+                        dm = st.session_state.div_master.copy()
+                        dm = apply_classification_rules(dm)
+                        st.session_state.div_master = dm
+                        set_flash("success", "Regra de núcleo ativada.")
+                    else:
+                        set_flash("warning", "ID de regra não encontrado.")
                     st.rerun()
             with colx2:
                 if st.button("Inativar regra núcleo"):
-                    update_rule_status("nucleo", rid, False)
+                    if update_rule_status("nucleo", rid, False):
+                        dm = st.session_state.div_master.copy()
+                        dm = apply_classification_rules(dm)
+                        st.session_state.div_master = dm
+                        set_flash("success", "Regra de núcleo inativada.")
+                    else:
+                        set_flash("warning", "ID de regra não encontrado.")
                     st.rerun()
             with colx3:
                 if st.button("Excluir regra núcleo"):
-                    delete_rule("nucleo", rid)
+                    if delete_rule("nucleo", rid):
+                        dm = st.session_state.div_master.copy()
+                        dm = apply_classification_rules(dm)
+                        st.session_state.div_master = dm
+                        set_flash("success", "Regra de núcleo excluída.")
+                    else:
+                        set_flash("warning", "ID de regra não encontrado.")
                     st.rerun()
 
         st.markdown("**Regras de Criticidade**")
@@ -1370,21 +1615,39 @@ else:
             coly1, coly2, coly3 = st.columns(3)
             with coly1:
                 if st.button("Ativar regra criticidade"):
-                    update_rule_status("criticidade", rid2, True)
+                    if update_rule_status("criticidade", rid2, True):
+                        dm = st.session_state.div_master.copy()
+                        dm = apply_classification_rules(dm)
+                        st.session_state.div_master = dm
+                        set_flash("success", "Regra de criticidade ativada.")
+                    else:
+                        set_flash("warning", "ID de regra não encontrado.")
                     st.rerun()
             with coly2:
                 if st.button("Inativar regra criticidade"):
-                    update_rule_status("criticidade", rid2, False)
+                    if update_rule_status("criticidade", rid2, False):
+                        dm = st.session_state.div_master.copy()
+                        dm = apply_classification_rules(dm)
+                        st.session_state.div_master = dm
+                        set_flash("success", "Regra de criticidade inativada.")
+                    else:
+                        set_flash("warning", "ID de regra não encontrado.")
                     st.rerun()
             with coly3:
                 if st.button("Excluir regra criticidade"):
-                    delete_rule("criticidade", rid2)
+                    if delete_rule("criticidade", rid2):
+                        dm = st.session_state.div_master.copy()
+                        dm = apply_classification_rules(dm)
+                        st.session_state.div_master = dm
+                        set_flash("success", "Regra de criticidade excluída.")
+                    else:
+                        set_flash("warning", "ID de regra não encontrado.")
                     st.rerun()
 
     # =====================================================
-    # Resumo / priorização / motivos detectados
+    # Resumo / priorização / IA operacional
     # =====================================================
-    with st.expander("Resumo para priorização (abertos, top impacto, distribuições, motivos detectados)", expanded=True):
+    with st.expander("Resumo para priorização + motor de aprendizado", expanded=True):
         df_open = div_master.loc[~resolved_mask].copy()
         df_open["ABS"] = df_open["VALOR"].abs()
 
@@ -1396,7 +1659,7 @@ else:
             nuc_opts = ["Todos"] + sorted([x for x in df_open["NUCLEO"].fillna("Não identificado").unique().tolist() if str(x).strip() != ""])
             top_nucleo = st.selectbox("Núcleo (Top 10)", nuc_opts, key="top10_nucleo")
         with t3:
-            st.caption("Estes filtros atuam apenas no Top 10 (não mexem na tratativa).")
+            st.caption("Estes filtros atuam apenas no Top 10.")
 
         top_src = df_open.copy()
         if top_origem != "Todas":
@@ -1408,8 +1671,8 @@ else:
         show_cols = ["ORIGEM", "DATA", "DOCUMENTO", "VALOR", "NUCLEO"]
         st.dataframe(top_open[show_cols].copy(), use_container_width=True, height=320)
 
-        st.markdown("**Distribuição por Origem (abertos)**")
         if len(df_open):
+            st.markdown("**Distribuição por Origem (abertos)**")
             dist_origem = df_open.groupby("ORIGEM", dropna=False).agg(Itens=("VALOR","size"), Valor=("VALOR","sum")).reset_index().sort_values("Valor", ascending=False)
             st.dataframe(dist_origem, use_container_width=True, height=160)
 
@@ -1423,7 +1686,7 @@ else:
             comp = comp.set_index("ORIGEM")
             st.bar_chart(comp["VALOR"])
 
-            st.markdown("**Motivos detectados (agrupamento base)**")
+            st.markdown("**Motivos detectados (painel técnico de apoio)**")
             motivos = (
                 df_open.groupby(["MOTIVO_BASE", "ORIGEM"], dropna=False)
                 .agg(
@@ -1437,60 +1700,44 @@ else:
             motivos = motivos.sort_values(["Itens", "ABS_IMPACTO"], ascending=[False, False])
             st.dataframe(motivos[["MOTIVO_BASE", "ORIGEM", "Itens", "Impacto", "Maior_Valor"]].head(25), use_container_width=True, height=320)
 
-            st.markdown("**Criar regra rápida a partir do motivo detectado**")
-            r1, r2, r3 = st.columns([2.2, 1.2, 1.0])
-            motivos_opts = [""] + motivos["MOTIVO_BASE"].fillna("").astype(str).unique().tolist()
-            with r1:
-                motivo_sel = st.selectbox("Motivo base", motivos_opts, key="motivo_sel_rapido")
-            with r2:
-                origem_sel = st.selectbox("Origem do motivo", ["", "Somente Financeiro", "Somente Contábil"], key="origem_sel_rapido")
-            with r3:
-                tipo_rapido = st.selectbox("Tipo", ["Núcleo", "Criticidade"], key="tipo_rapido")
+            st.markdown("**Sugestões automáticas de novas regras (com base nas correções confirmadas)**")
+            sug = build_learning_suggestions(st.session_state.div_master)
 
-            r4, r5, r6 = st.columns([1.2, 1.2, 1.0])
-            with r4:
-                res_nuc = st.selectbox("Resultado Núcleo", NUCLEOS, key="res_nuc_rapido")
-            with r5:
-                res_crit = st.selectbox("Resultado Criticidade", SEVERIDADES, key="res_crit_rapido")
-            with r6:
-                prio_rapido = st.number_input("Prioridade rápida", min_value=1, value=80, step=1, key="prio_rapido")
+            if sug.empty:
+                st.info("Ainda não há sugestões automáticas suficientes. Confirme e ajuste alguns itens para o motor começar a aprender.")
+            else:
+                st.dataframe(sug.head(20), use_container_width=True, height=280)
 
-            if st.button("Salvar regra rápida", type="primary"):
-                if not str(motivo_sel).strip():
-                    st.warning("Selecione um motivo base.")
-                else:
-                    if tipo_rapido == "Núcleo":
-                        add_rule("nucleo", {
-                            "nome": f"Motivo: {motivo_sel[:60]}",
-                            "prioridade": int(prio_rapido),
+                sx1, sx2 = st.columns([2.2, 1.0])
+                with sx1:
+                    sug_idx = st.number_input("Linha da sugestão (pela ordem exibida, começando em 0)", min_value=0, max_value=max(0, len(sug.head(20)) - 1), step=1, value=0)
+                with sx2:
+                    sug_prio = st.number_input("Prioridade da regra sugerida", min_value=1, value=70, step=1)
+
+                if st.button("Transformar sugestão em regra", type="primary"):
+                    sug_top = sug.head(20).reset_index(drop=True)
+                    if int(sug_idx) < len(sug_top):
+                        row = sug_top.loc[int(sug_idx)]
+                        ok, msg = add_rule("nucleo", {
+                            "nome": f'Sugestão: {str(row["MOTIVO_BASE"])[:50]}',
+                            "prioridade": int(sug_prio),
                             "ativa": True,
-                            "origem": origem_sel.strip(),
-                            "texto_contem": motivo_sel.strip(),
+                            "origem": row["ORIGEM"],
+                            "texto_contem": row["MOTIVO_BASE"],
                             "regex": "",
                             "documento_prefixo": "",
                             "valor_min": "",
                             "valor_max": "",
-                            "resultado": res_nuc,
+                            "resultado": row["NUCLEO_FINAL"],
                         })
-                    else:
-                        add_rule("criticidade", {
-                            "nome": f"Motivo: {motivo_sel[:60]}",
-                            "prioridade": int(prio_rapido),
-                            "ativa": True,
-                            "origem": origem_sel.strip(),
-                            "texto_contem": motivo_sel.strip(),
-                            "regex": "",
-                            "documento_prefixo": "",
-                            "valor_min": "",
-                            "valor_max": "",
-                            "resultado": res_crit,
-                        })
-
-                    dm = st.session_state.div_master.copy()
-                    dm = apply_classification_rules(dm)
-                    st.session_state.div_master = dm
-                    st.success("Regra rápida salva e reaplicada.")
-                    st.rerun()
+                        if ok:
+                            dm = st.session_state.div_master.copy()
+                            dm = apply_classification_rules(dm)
+                            st.session_state.div_master = dm
+                            set_flash("success", msg)
+                        else:
+                            set_flash("warning", msg)
+                        st.rerun()
         else:
             st.info("Sem pendências em aberto.")
 
@@ -1526,10 +1773,7 @@ else:
 
     if busca.strip():
         q = busca.strip().lower()
-        cols_search = [
-            "DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "NUCLEO", "ORIGEM",
-            "SEVERIDADE", "MOTIVO_BASE", "REGRA_NUCLEO_APLICADA", "REGRA_SEVERIDADE_APLICADA"
-        ]
+        cols_search = ["DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "NUCLEO", "ORIGEM", "SEVERIDADE", "NUCLEO_SUGERIDO"]
         mask = False
         for c in cols_search:
             if c in df.columns:
@@ -1566,8 +1810,7 @@ else:
     dm0 = st.session_state.div_master.copy()
     selecionados_count = int(dm0["SELECIONADO"].fillna(False).sum())
 
-    bar = st.container()
-    with bar:
+    with st.container():
         st.markdown('<div class="cm-actionbar">', unsafe_allow_html=True)
         a1, a2, a3 = st.columns([1.2, 1.2, 2.2], gap="large")
         with a1:
@@ -1629,23 +1872,31 @@ else:
                 dm.loc[target_ids, "STATUS"] = dm.loc[target_ids, "STATUS"].replace({"Resolvido": "Pendente"})
 
         dm.loc[target_ids, "SELECIONADO"] = False
+        save_learning_examples(dm.loc[target_ids].copy())
         st.session_state.div_master = dm
-        st.success(f"Ação aplicada em {len(target_ids)} itens.")
+        set_flash("success", f"Ação aplicada em {len(target_ids)} itens.")
         st.rerun()
 
     # =====================================================
-    # Tratativa
+    # Tratativa limpa
     # =====================================================
     st.markdown("### Tratativa (tabela)")
-    st.markdown('<div class="cm-help">Sugestão: confirme quando fizer sentido; status e obs ajudam na rastreabilidade. Resolver marca Status=Resolvido.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cm-help">Aqui fica a camada operacional. As colunas técnicas foram removidas da grade principal.</div>', unsafe_allow_html=True)
 
     view_cols = [
         "SELECIONADO",
-        "ORIGEM", "SEVERIDADE", "DATA", "DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "VALOR",
-        "MOTIVO_BASE",
-        "NUCLEO_SUGERIDO", "REGRA_NUCLEO_APLICADA", "REGRA_SEVERIDADE_APLICADA",
-        "CONFIRMADO", "NUCLEO",
-        "STATUS", "RESOLVIDO", "OBS_USUARIO"
+        "ORIGEM",
+        "SEVERIDADE",
+        "DATA",
+        "DOCUMENTO",
+        "CHAVE_DOC",
+        "VALOR",
+        "NUCLEO_SUGERIDO",
+        "CONFIRMADO",
+        "NUCLEO",
+        "STATUS",
+        "RESOLVIDO",
+        "OBS_USUARIO"
     ]
     df_view = df[view_cols].copy()
     df_view_display = df_view.copy()
@@ -1657,13 +1908,9 @@ else:
         "SEVERIDADE": st.column_config.TextColumn(disabled=True),
         "DATA": st.column_config.TextColumn(disabled=True),
         "DOCUMENTO": st.column_config.TextColumn(disabled=True),
-        "HISTORICO_OPERACAO": st.column_config.TextColumn(disabled=True),
         "CHAVE_DOC": st.column_config.TextColumn(disabled=True),
         "VALOR": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
-        "MOTIVO_BASE": st.column_config.TextColumn(disabled=True),
         "NUCLEO_SUGERIDO": st.column_config.TextColumn(disabled=True),
-        "REGRA_NUCLEO_APLICADA": st.column_config.TextColumn(disabled=True),
-        "REGRA_SEVERIDADE_APLICADA": st.column_config.TextColumn(disabled=True),
         "CONFIRMADO": st.column_config.CheckboxColumn(),
         "NUCLEO": st.column_config.SelectboxColumn(options=NUCLEOS),
         "STATUS": st.column_config.SelectboxColumn(options=STATUS_OPTS),
@@ -1683,10 +1930,13 @@ else:
     if edited is not None and len(edited) == len(df_view_display):
         to_update = edited.copy()
 
-        if "NUCLEO_SUGERIDO" in to_update.columns:
-            to_update["NUCLEO"] = to_update["NUCLEO"].fillna("Não identificado").replace("", "Não identificado")
-            need = to_update["CONFIRMADO"].fillna(False) & (to_update["NUCLEO"].astype(str).str.strip().eq("") | to_update["NUCLEO"].eq("Não identificado"))
-            to_update.loc[need, "NUCLEO"] = to_update.loc[need, "NUCLEO_SUGERIDO"].fillna("Não identificado")
+        to_update["NUCLEO"] = to_update["NUCLEO"].fillna("Não identificado").replace("", "Não identificado")
+
+        need = to_update["CONFIRMADO"].fillna(False) & (
+            to_update["NUCLEO"].astype(str).str.strip().eq("") |
+            to_update["NUCLEO"].eq("Não identificado")
+        )
+        to_update.loc[need, "NUCLEO"] = to_update.loc[need, "NUCLEO_SUGERIDO"].fillna("Não identificado")
 
         res_col = to_update["RESOLVIDO"].fillna(False)
         to_update.loc[res_col, "STATUS"] = "Resolvido"
@@ -1696,6 +1946,7 @@ else:
         for c in upd_cols:
             dm.loc[to_update.index, c] = to_update[c].values
 
+        save_learning_examples(dm.loc[to_update.index].copy())
         st.session_state.div_master = dm
         div_master = dm.copy()
 
@@ -1733,18 +1984,23 @@ else:
   <div class="row"><span class="label">Documento:</span> <span class="val">{r.get('DOCUMENTO','')}</span></div>
   <div class="row"><span class="label">Chave:</span> <span class="val">{r.get('CHAVE_DOC','')}</span></div>
   <div class="row"><span class="label">Valor:</span> <span class="val">{fmt(r.get('VALOR', np.nan))}</span></div>
-  <div class="row"><span class="label">Motivo base:</span> <span class="val">{r.get('MOTIVO_BASE','')}</span></div>
   <div class="row"><span class="label">Núcleo sugerido:</span> <span class="val">{r.get('NUCLEO_SUGERIDO','')}</span></div>
-  <div class="row"><span class="label">Regra núcleo:</span> <span class="val">{r.get('REGRA_NUCLEO_APLICADA','')}</span></div>
-  <div class="row"><span class="label">Regra criticidade:</span> <span class="val">{r.get('REGRA_SEVERIDADE_APLICADA','')}</span></div>
+  <div class="row"><span class="label">Núcleo final:</span> <span class="val">{r.get('NUCLEO','')}</span></div>
   <div class="row"><span class="label">Confirmado:</span> <span class="val">{confirmado_txt}</span></div>
-  <div class="row"><span class="label">Núcleo:</span> <span class="val">{r.get('NUCLEO','')}</span></div>
   <div class="row"><span class="label">Status:</span> <span class="val">{r.get('STATUS','')}</span></div>
   <div class="row"><span class="label">Resolvido:</span> <span class="val">{resolvido_txt}</span></div>
 </div>
 """,
             unsafe_allow_html=True,
         )
+
+        with st.expander("Ver detalhes técnicos do item", expanded=False):
+            st.write({
+                "MOTIVO_BASE": r.get("MOTIVO_BASE", ""),
+                "REGRA_NUCLEO_APLICADA": r.get("REGRA_NUCLEO_APLICADA", ""),
+                "REGRA_SEVERIDADE_APLICADA": r.get("REGRA_SEVERIDADE_APLICADA", ""),
+                "HISTORICO_OPERACAO": r.get("HISTORICO_OPERACAO", ""),
+            })
 
         resumo = (
             f"ID: {pick_id}\n"
@@ -1754,18 +2010,14 @@ else:
             f"DOCUMENTO: {r.get('DOCUMENTO','')}\n"
             f"CHAVE: {r.get('CHAVE_DOC','')}\n"
             f"VALOR: {fmt(r.get('VALOR', np.nan))}\n"
-            f"MOTIVO_BASE: {r.get('MOTIVO_BASE','')}\n"
             f"NUCLEO_SUGERIDO: {r.get('NUCLEO_SUGERIDO','')}\n"
-            f"REGRA_NUCLEO_APLICADA: {r.get('REGRA_NUCLEO_APLICADA','')}\n"
-            f"REGRA_SEVERIDADE_APLICADA: {r.get('REGRA_SEVERIDADE_APLICADA','')}\n"
             f"CONFIRMADO: {confirmado_txt}\n"
             f"NUCLEO: {r.get('NUCLEO','')}\n"
             f"STATUS: {r.get('STATUS','')}\n"
             f"RESOLVIDO: {resolvido_txt}\n"
             f"OBS: {r.get('OBS_USUARIO','')}\n"
-            f"HISTÓRICO: {r.get('HISTORICO_OPERACAO','')}"
         )
-        st.text_area("Copiar resumo (e-mail/ticket)", value=resumo, height=230)
+        st.text_area("Copiar resumo (e-mail/ticket)", value=resumo, height=210)
 
     # =====================================================
     # Export
@@ -1773,7 +2025,9 @@ else:
     st.markdown("### Exportar")
     filtros = {"origem": origem, "ver": ver, "severidade": sev, "busca": busca.strip(), "_total_aberto": valor_aberto}
 
-    df_export = df_view.drop(columns=["SELECIONADO"]).copy()
+    export_cols = ["ORIGEM", "DATA", "DOCUMENTO", "CHAVE_DOC", "VALOR", "NUCLEO_SUGERIDO", "CONFIRMADO", "NUCLEO", "STATUS", "RESOLVIDO", "OBS_USUARIO"]
+    df_export = df[export_cols].copy()
+
     excel_bytes = to_excel_divergencias_filtradas(df_filtrado=df_export, filtros=filtros, stats=stats, generated_at=generated_at)
     pdf_bytes = to_pdf_resumo(stats, generated_at, st.session_state.div_master)
 
