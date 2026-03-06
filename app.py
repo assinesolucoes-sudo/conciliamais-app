@@ -1517,10 +1517,20 @@ load_learning()
 with st.sidebar:
     st.markdown("## Navegação")
     mod = st.radio("Módulo", ["Financeiro", "ProCV"], index=0)
+
     if mod == "Financeiro":
-        area = st.radio("Área", ["Extrato Bancário", "Posição a Pagar", "Posição a Receber"], index=0)
-   else:
-    area = st.radio("Área", ["Cruzamento Inteligente"], index=0)
+        area = st.radio(
+            "Área",
+            ["Extrato Bancário", "Posição a Pagar", "Posição a Receber"],
+            index=0
+        )
+    else:
+        area = st.radio(
+            "Área",
+            ["Cruzamento Inteligente"],
+            index=0
+        )
+
     st.markdown("---")
     st.caption(f"Você está em: {mod} > {area}")
 
