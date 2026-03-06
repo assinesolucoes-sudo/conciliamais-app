@@ -1591,7 +1591,7 @@ def render_cruzamento_inteligente_v2():
             return df_base.copy()
         return df_base.drop_duplicates(subset=[key_col_name], keep="first").copy()
 
-         def _to_excel_package(
+     def _to_excel_package(
         df_result,
         resumo_dict,
         dup_a_df=None,
