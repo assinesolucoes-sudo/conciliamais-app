@@ -1248,7 +1248,14 @@ if st.session_state.page == "upload":
                 div.loc[mask_fin, "DOCUMENTO"],
             )
 
-        # Documento do contábil extraído do histórico quando faltar
-        mask_led = div["ORIGEM"].eq("Somente Contábil")
-        if "HISTORICO_OPERACAO" in div.columns:
-            missing =
+ # Documento do contábil extraído do histórico quando faltar
+mask_led = div["ORIGEM"].eq("Somente Contábil")
+if "HISTORICO_OPERACAO" in div.columns:
+    missing = div.loc[mask_led, "DOCUMENTO"].astype(str).str.strip().eq("")
+    div.loc[mask_led & missing, "DOCUMENTO"] = (
+        div.loc[mask_led & missing, "HISTORICO_OPERACAO"]
+        .astype(str)
+        .str.extract(r'([A-Z]{2,}-?\d+[-/]?\d*)', expand=False)
+        .fillna(div.loc[mask_led & missing, "DOCUMENTO"])
+    )
+
