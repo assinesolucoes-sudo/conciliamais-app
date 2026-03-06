@@ -1965,70 +1965,13 @@ with st.sidebar:
     st.caption(f"Você está em: {mod} > {area}")
 
 if mod == "ProCV" and area == "Cruzamento Inteligente":
-    st.title("Cruzamento Inteligente")
-    st.caption("Cruze duas bases, defina a chave de relacionamento e identifique diferenças automaticamente.")
+    render_cruzamento_inteligente_v2()
+    st.stop()
 
-    def _norm_text(x):
-        if pd.isna(x):
-            return ""
-        s = str(x).strip().lower()
-        s = re.sub(r"\s+", " ", s)
-        return s
-
-    def _build_key(df_base, cols):
-        if not cols:
-            return pd.Series([""] * len(df_base), index=df_base.index)
-        key = df_base[cols[0]].astype(str).fillna("").map(_norm_text)
-        for c in cols[1:]:
-            key = key + "||" + df_base[c].astype(str).fillna("").map(_norm_text)
-        return key
-
-    def _suggest_columns(cols_a, cols_b):
-        sug = []
-        for a in cols_a:
-            na = _norm_text(a)
-            for b in cols_b:
-                nb = _norm_text(b)
-                score = 0
-                if na == nb:
-                    score += 100
-                if na in nb or nb in na:
-                    score += 40
-                toks_a = set(na.split())
-                toks_b = set(nb.split())
-                score += len(toks_a.intersection(toks_b)) * 10
-                if score > 0:
-                    sug.append((a, b, score))
-        sug = sorted(sug, key=lambda x: x[2], reverse=True)
-        return sug
-
-    st.markdown("### 1) Upload das bases")
-    c1, c2 = st.columns(2)
-
-    with c1:
-        base_a_file = st.file_uploader(
-            "Upload da Base A (.xlsx ou .csv)",
-            type=["xlsx", "csv"],
-            key="procv_base_a"
-        )
-
-    with c2:
-        base_b_file = st.file_uploader(
-            "Upload da Base B (.xlsx ou .csv)",
-            type=["xlsx", "csv"],
-            key="procv_base_b"
-        )
-
-    if not base_a_file or not base_b_file:
-        st.info("Faça o upload das duas bases para iniciar o cruzamento.")
-        st.stop()
-
-    try:
-        df_a = read_table(base_a_file)
-        df_b = read_table(base_b_file)
-    except Exception as e:
-        st.error(f"Erro ao ler os arquivos: {e}")
-        st.stop()
+elif mod != "Financeiro" or area != "Extrato Bancário":
+    st.title("ConciliaMais")
+    st.info("Esta área ainda está em construção. Por enquanto, use Financeiro > Extrato Bancário.")
+    st.stop()
 
     st.markdown("### 2) Visão inicial das bases")
     v1, v2 = st.columns(2)
