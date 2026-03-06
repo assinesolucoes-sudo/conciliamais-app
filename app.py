@@ -1591,7 +1591,7 @@ def render_cruzamento_inteligente_v2():
             return df_base.copy()
         return df_base.drop_duplicates(subset=[key_col_name], keep="first").copy()
 
-      def _to_excel_package(
+         def _to_excel_package(
         df_result,
         resumo_dict,
         dup_a_df=None,
@@ -1723,71 +1723,6 @@ def render_cruzamento_inteligente_v2():
 
         output.seek(0)
         return output
-
-            # Resumo executivo
-            resumo_df = pd.DataFrame([
-                ["Objetivo", resumo_dict.get("objetivo", "")],
-                ["Direção", resumo_dict.get("direcao", "")],
-                ["Total analisado", resumo_dict.get("total", 0)],
-                ["Encontrados", resumo_dict.get("encontrados", 0)],
-                ["Não encontrados", resumo_dict.get("nao_encontrados", 0)],
-                ["Duplicidades na Base A", resumo_dict.get("dup_a", 0)],
-                ["Duplicidades na Base B", resumo_dict.get("dup_b", 0)],
-                ["Divergências", resumo_dict.get("divergentes", 0)],
-                ["Aderência (%)", resumo_dict.get("aderencia", 0.0)],
-                ["Base A sem duplicados", resumo_dict.get("base_a_sem_dup_qtd", 0)],
-                ["Base B sem duplicados", resumo_dict.get("base_b_sem_dup_qtd", 0)],
-            ], columns=["Indicador", "Valor"])
-
-            resumo_df.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False)
-            wsr = writer.sheets["RESUMO_EXECUTIVO"]
-            wsr.write(0, 0, "Indicador", fmt_hdr)
-            wsr.write(0, 1, "Valor", fmt_hdr)
-            wsr.set_column(0, 0, 30)
-            wsr.set_column(1, 1, 20)
-            for r in range(1, len(resumo_df) + 1):
-                wsr.write(r, 0, resumo_df.iloc[r - 1, 0], fmt_label)
-                wsr.write(r, 1, resumo_df.iloc[r - 1, 1], fmt_value)
-
-            # Não encontrados
-            df_nao = df_result[df_result["RESULTADO_FINAL"] == "Sem correspondência"].copy()
-            df_nao.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
-
-            # Duplicidades
-            if dup_a_df is not None and not dup_a_df.empty:
-                dup_a_df.to_excel(writer, sheet_name="DUP_BASE_A", index=False)
-            if dup_b_df is not None and not dup_b_df.empty:
-                dup_b_df.to_excel(writer, sheet_name="DUP_BASE_B", index=False)
-
-            # Bases sem duplicados
-            if base_a_sem_dup is not None and not base_a_sem_dup.empty:
-                base_a_sem_dup.to_excel(writer, sheet_name="BASE_A_SEM_DUPLICADOS", index=False)
-            if base_b_sem_dup is not None and not base_b_sem_dup.empty:
-                base_b_sem_dup.to_excel(writer, sheet_name="BASE_B_SEM_DUPLICADOS", index=False)
-
-            # Resultado completo
-            df_result.to_excel(writer, sheet_name="RESULTADO_COMPLETO", index=False)
-
-            for sheet_name, df_sheet in {
-                "NAO_ENCONTRADOS": df_nao,
-                "DUP_BASE_A": dup_a_df if dup_a_df is not None else pd.DataFrame(),
-                "DUP_BASE_B": dup_b_df if dup_b_df is not None else pd.DataFrame(),
-                "BASE_A_SEM_DUPLICADOS": base_a_sem_dup if base_a_sem_dup is not None else pd.DataFrame(),
-                "BASE_B_SEM_DUPLICADOS": base_b_sem_dup if base_b_sem_dup is not None else pd.DataFrame(),
-                "RESULTADO_COMPLETO": df_result
-            }.items():
-                if sheet_name in writer.sheets:
-                    ws = writer.sheets[sheet_name]
-                    if len(df_sheet.columns) > 0:
-                        for c, col in enumerate(df_sheet.columns):
-                            ws.write(0, c, col, fmt_hdr)
-                            sample = [str(col)] + df_sheet[col].astype(str).head(200).tolist()
-                            width = min(max(max(len(x) for x in sample) + 2, 12), 42)
-                            ws.set_column(c, c, width)
-
-        output.seek(0)
-        return output
-
     # 1) Objetivo
     st.markdown("### 1) O que você deseja fazer?")
     objetivo = st.radio(
