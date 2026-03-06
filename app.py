@@ -35,6 +35,8 @@ STATUS_OPTS = ["Pendente", "Em análise", "Resolvido"]
 SEVERIDADES = ["Normal", "Atenção", "Crítica"]
 ORIGEM_RULE_OPTS = ["Qualquer", "Somente Financeiro", "Somente Contábil"]
 
+SEVERITY_ORDER = {"Crítica": 3, "Atenção": 2, "Normal": 1}
+
 # =========================================================
 # CSS
 # =========================================================
@@ -58,7 +60,7 @@ body { background: var(--bg) !important; }
 .block-container {
   padding-top: 1.0rem;
   padding-bottom: 2.2rem;
-  max-width: 1450px;
+  max-width: 1480px;
 }
 
 .cm-help { color: var(--muted); font-size: 13px; margin-top: -6px; }
@@ -139,6 +141,11 @@ body { background: var(--bg) !important; }
   border:1px solid var(--border);
   background: rgba(37,99,235,.14);
   color:#BFDBFE;
+}
+
+.cm-subtle{
+  color: var(--muted);
+  font-size: 12px;
 }
 
 div.stButton > button[kind="primary"]{
@@ -231,6 +238,32 @@ def pill_calculo(conferencia):
         return '<span class="cm-pill cm-warn">Quase (verificar)</span>'
     return '<span class="cm-pill cm-bad">Inconsistente</span>'
 
+def origem_visual_text(origem):
+    if str(origem) == "Somente Financeiro":
+        return "● Financeiro"
+    if str(origem) == "Somente Contábil":
+        return "● Contábil"
+    return str(origem)
+
+def get_nucleo_display_series(df):
+    nuc_final = df.get("NUCLEO", pd.Series(["Não identificado"] * len(df), index=df.index)).fillna("Não identificado").astype(str).str.strip()
+    nuc_sug = df.get("NUCLEO_SUGERIDO", pd.Series(["Não identificado"] * len(df), index=df.index)).fillna("Não identificado").astype(str).str.strip()
+    confirmado = df.get("CONFIRMADO", pd.Series([False] * len(df), index=df.index)).fillna(False)
+
+    out = nuc_final.copy()
+    mask_empty = out.isin(["", "Não identificado"])
+    out.loc[mask_empty & (~confirmado)] = nuc_sug.loc[mask_empty & (~confirmado)]
+    out = out.replace("", "Não identificado").fillna("Não identificado")
+    return out
+
+def build_sort_columns(df):
+    dfx = df.copy()
+    dfx["__RES"] = dfx["RESOLVIDO"].fillna(False) | dfx["STATUS"].astype(str).str.lower().eq("resolvido")
+    dfx["__SEV_ORD"] = dfx["SEVERIDADE"].map(SEVERITY_ORDER).fillna(0)
+    dfx["__ABS_VAL"] = dfx["VALOR"].map(normalize_money).abs()
+    dfx["__DATA_SORT"] = pd.to_datetime(dfx["DATA"], errors="coerce")
+    return dfx
+
 # =========================================================
 # Núcleos persistentes
 # =========================================================
@@ -251,13 +284,10 @@ def load_nucleos():
             data = json.load(f)
         nucs = data.get("nucleos", DEFAULT_NUCLEOS)
         nucs = [str(x).strip() for x in nucs if str(x).strip()]
-        # garante defaults
         for d in DEFAULT_NUCLEOS:
             if d not in nucs:
                 nucs.append(d)
-        # remove RP legado
         nucs = ["Configuração ERP" if x == "Configuração RP" else x for x in nucs]
-        # Não identificado sempre por último
         nucs = [x for x in nucs if x != "Não identificado"] + ["Não identificado"]
         save_nucleos({"nucleos": nucs})
         return nucs
@@ -296,7 +326,6 @@ def rename_nucleo(old_name, new_name):
     nucs = [new_name if x == old_name else x for x in nucs]
     save_nucleos({"nucleos": nucs})
 
-    # atualiza regras
     payload = load_rules()
     for bucket in ["nucleo_rules"]:
         for r in payload[bucket]:
@@ -304,7 +333,6 @@ def rename_nucleo(old_name, new_name):
                 r["resultado"] = new_name
     save_rules(payload)
 
-    # atualiza aprendizado
     learning = load_learning()
     for ex in learning["examples"]:
         if str(ex.get("nucleo_sugerido", "")).strip() == old_name:
@@ -313,7 +341,6 @@ def rename_nucleo(old_name, new_name):
             ex["nucleo_final"] = new_name
     save_learning(learning)
 
-    # atualiza sessão
     if st.session_state.get("div_master") is not None:
         dm = st.session_state.div_master.copy()
         for c in ["NUCLEO", "NUCLEO_SUGERIDO"]:
@@ -334,7 +361,6 @@ def delete_nucleo(nome):
     nucs = [x for x in nucs if x != nome]
     save_nucleos({"nucleos": nucs})
 
-    # regras que apontam para esse núcleo vão para Não identificado
     payload = load_rules()
     for r in payload["nucleo_rules"]:
         if str(r.get("resultado", "")).strip() == nome:
@@ -368,7 +394,6 @@ def load_rules():
             data = default_rules_payload()
         data.setdefault("nucleo_rules", [])
         data.setdefault("criticidade_rules", [])
-        # migração RP -> ERP
         for r in data["nucleo_rules"]:
             if str(r.get("resultado", "")) == "Configuração RP":
                 r["resultado"] = "Configuração ERP"
@@ -1043,7 +1068,7 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     return div, stats
 
 # =========================================================
-# Excel Export (limpo + histórico + núcleo final)
+# Excel Export
 # =========================================================
 def _autofit_worksheet(ws, df, start_col, max_width=70, min_width=10):
     for j, col in enumerate(df.columns):
@@ -1058,15 +1083,56 @@ def to_excel_divergencias_filtradas(df_filtrado, filtros, stats, generated_at):
     with pd.ExcelWriter(out, engine="xlsxwriter") as w:
         wb = w.book
 
-        fmt_title = wb.add_format({"bold": True, "font_size": 14, "font_color": "#0F172A"})
-        fmt_k = wb.add_format({"bold": True, "font_size": 10, "font_color": "#334155"})
-        fmt_info = wb.add_format({"font_size": 10, "font_color": "#334155"})
-        fmt_hdr = wb.add_format({"bold": True, "border": 1, "align": "center", "valign": "vcenter", "bg_color": "#DBEAFE", "font_color": "#0F172A"})
+        fmt_title = wb.add_format({
+            "bold": True, "font_size": 16, "font_color": "#0F172A",
+            "align": "left", "valign": "vcenter"
+        })
+        fmt_subtitle = wb.add_format({
+            "font_size": 10, "font_color": "#475569", "italic": True
+        })
+        fmt_label = wb.add_format({
+            "bold": True, "font_size": 10, "font_color": "#334155"
+        })
+        fmt_info = wb.add_format({
+            "font_size": 10, "font_color": "#334155"
+        })
+        fmt_hdr = wb.add_format({
+            "bold": True, "border": 1, "align": "center", "valign": "vcenter",
+            "bg_color": "#DBEAFE", "font_color": "#0F172A"
+        })
         fmt_txt = wb.add_format({"border": 1, "text_wrap": True, "valign": "top"})
         fmt_date = wb.add_format({"num_format": "dd/mm/yyyy", "border": 1})
         fmt_money = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "border": 1})
-        fmt_money_big = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "bold": True})
+        fmt_money_big = wb.add_format({
+            "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00',
+            "bold": True, "font_size": 12, "font_color": "#0F172A"
+        })
+        fmt_section = wb.add_format({
+            "bold": True, "font_size": 12, "font_color": "white",
+            "bg_color": "#1E293B", "align": "left", "valign": "vcenter"
+        })
+        fmt_metric = wb.add_format({"border": 1, "font_color": "#0F172A"})
+        fmt_metric_money = wb.add_format({"border": 1, "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'})
+        fmt_kpi_box = wb.add_format({
+            "bold": True, "font_size": 10, "font_color": "#334155",
+            "bg_color": "#F8FAFC", "border": 1, "text_wrap": True, "align": "center", "valign": "vcenter"
+        })
+        fmt_kpi_value = wb.add_format({
+            "bold": True, "font_size": 14, "font_color": "#0F172A",
+            "bg_color": "#EFF6FF", "border": 1, "align": "center", "valign": "vcenter",
+            "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'
+        })
+        fmt_kpi_value_int = wb.add_format({
+            "bold": True, "font_size": 14, "font_color": "#0F172A",
+            "bg_color": "#EFF6FF", "border": 1, "align": "center", "valign": "vcenter"
+        })
+        fmt_obs = wb.add_format({
+            "font_size": 9, "font_color": "#64748B", "italic": True
+        })
 
+        # -------------------------------------------------
+        # Aba Divergências
+        # -------------------------------------------------
         sh = "Divergencias"
         df = df_filtrado.copy()
 
@@ -1083,23 +1149,34 @@ def to_excel_divergencias_filtradas(df_filtrado, filtros, stats, generated_at):
         w.sheets[sh] = ws
 
         ws.write(0, 0, "ConciliaMais — Divergências Tratadas", fmt_title)
-        ws.write(1, 0, "Processado em:", fmt_k)
-        ws.write(1, 1, generated_at, fmt_info)
+        ws.write(1, 0, "Base filtrada para análise e tratativa", fmt_subtitle)
 
-        ws.write(2, 0, "Origem:", fmt_k);      ws.write(2, 1, filtros.get("origem", "Todas"), fmt_info)
-        ws.write(3, 0, "Visualização:", fmt_k); ws.write(3, 1, filtros.get("ver", "Todas"), fmt_info)
-        ws.write(4, 0, "Severidade:", fmt_k);   ws.write(4, 1, filtros.get("severidade", "Todas"), fmt_info)
-        ws.write(5, 0, "Busca:", fmt_k);        ws.write(5, 1, filtros.get("busca", ""), fmt_info)
+        ws.write(3, 0, "Processado em:", fmt_label)
+        ws.write(3, 1, generated_at, fmt_info)
+        ws.write(4, 0, "Origem:", fmt_label)
+        ws.write(4, 1, filtros.get("origem", "Todas"), fmt_info)
+        ws.write(5, 0, "Visualização:", fmt_label)
+        ws.write(5, 1, filtros.get("ver", "Todas"), fmt_info)
+        ws.write(6, 0, "Severidade:", fmt_label)
+        ws.write(6, 1, filtros.get("severidade", "Todas"), fmt_info)
+        ws.write(7, 0, "Núcleo:", fmt_label)
+        ws.write(7, 1, filtros.get("nucleo", "Todos"), fmt_info)
+        ws.write(8, 0, "Status:", fmt_label)
+        ws.write(8, 1, filtros.get("status", "Todos"), fmt_info)
+        ws.write(9, 0, "Busca:", fmt_label)
+        ws.write(9, 1, filtros.get("busca", ""), fmt_info)
 
         total_aberto = float(filtros.get("_total_aberto", 0.0) or 0.0)
         total_filtrado = float(df["VALOR"].sum()) if ("VALOR" in df.columns and len(df)) else 0.0
 
-        ws.write(2, 6, "Total do filtro:", fmt_k)
-        ws.write_number(2, 7, total_filtrado, fmt_money_big)
-        ws.write(3, 6, "Total em aberto:", fmt_k)
-        ws.write_number(3, 7, total_aberto, fmt_money_big)
+        ws.write(3, 6, "Total do filtro:", fmt_label)
+        ws.write_number(3, 7, total_filtrado, fmt_money_big)
+        ws.write(4, 6, "Total em aberto:", fmt_label)
+        ws.write_number(4, 7, total_aberto, fmt_money_big)
+        ws.write(5, 6, "Itens do filtro:", fmt_label)
+        ws.write_number(5, 7, len(df), fmt_info)
 
-        start_row_table = 8
+        start_row_table = 12
         start_col_table = 0
 
         df2 = df.copy().reset_index(drop=True)
@@ -1107,7 +1184,7 @@ def to_excel_divergencias_filtradas(df_filtrado, filtros, stats, generated_at):
 
         for j, col in enumerate(df2.columns):
             ws.write(start_row_table, start_col_table + j, col, fmt_hdr)
-        ws.set_row(start_row_table, 22)
+        ws.set_row(start_row_table, 24)
 
         for r in range(len(df2)):
             excel_r = start_row_table + 1 + r
@@ -1155,7 +1232,56 @@ def to_excel_divergencias_filtradas(df_filtrado, filtros, stats, generated_at):
         ws.freeze_panes(start_row_table + 1, 0)
         _autofit_worksheet(ws, df2, start_col_table)
 
-        resumo = pd.DataFrame([
+        # -------------------------------------------------
+        # Aba Resumo
+        # -------------------------------------------------
+        wsr = wb.add_worksheet("Resumo")
+        w.sheets["Resumo"] = wsr
+        wsr.set_zoom(95)
+        wsr.set_column(0, 0, 42)
+        wsr.set_column(1, 1, 20)
+        wsr.set_column(3, 3, 28)
+        wsr.set_column(4, 4, 20)
+        wsr.set_column(6, 11, 18)
+
+        wsr.merge_range("A1:F1", "ConciliaMais — Resumo Executivo", fmt_title)
+        wsr.merge_range("A2:F2", f"Gerado em {generated_at}", fmt_subtitle)
+
+        df_res = df_filtrado.copy()
+        if "VALOR" in df_res.columns:
+            df_res["VALOR"] = df_res["VALOR"].map(normalize_money)
+
+        total_itens = len(df_res)
+        total_valor = float(df_res["VALOR"].sum()) if total_itens else 0.0
+        itens_res = int((df_res["RESOLVIDO"].astype(str).str.lower().eq("sim")).sum()) if total_itens and "RESOLVIDO" in df_res.columns else 0
+        itens_ab = max(total_itens - itens_res, 0)
+        pct_res = (itens_res / total_itens * 100.0) if total_itens else 0.0
+
+        wsr.merge_range("A4:B4", "Visão geral", fmt_section)
+        wsr.write("A5", "Itens do filtro", fmt_kpi_box)
+        wsr.write_number("B5", total_itens, fmt_kpi_value_int)
+
+        wsr.write("A6", "Valor total do filtro", fmt_kpi_box)
+        wsr.write_number("B6", total_valor, fmt_kpi_value)
+
+        wsr.write("D5", "Itens resolvidos", fmt_kpi_box)
+        wsr.write_number("E5", itens_res, fmt_kpi_value_int)
+
+        wsr.write("D6", "Itens em aberto", fmt_kpi_box)
+        wsr.write_number("E6", itens_ab, fmt_kpi_value_int)
+
+        wsr.write("G5", "Conferência do cálculo", fmt_kpi_box)
+        if pd.notna(stats.get("conferencia", np.nan)):
+            wsr.write_number("H5", float(stats.get("conferencia", np.nan)), fmt_kpi_value)
+        else:
+            wsr.write("H5", "-", fmt_kpi_value_int)
+
+        wsr.write("G6", "% resolvido", fmt_kpi_box)
+        wsr.write("H6", f"{pct_res:.1f}%", fmt_kpi_value_int)
+
+        wsr.merge_range("A9:B9", "Composição de saldos", fmt_section)
+
+        resumo_comp = [
             ["Saldo anterior – Financeiro", stats.get("saldo_ant_fin", np.nan)],
             ["Saldo anterior – Contábil", stats.get("saldo_ant_led", np.nan)],
             ["Diferença saldo anterior (Fin - Cont)", stats.get("diff_saldo_ant", np.nan)],
@@ -1169,13 +1295,82 @@ def to_excel_divergencias_filtradas(df_filtrado, filtros, stats, generated_at):
             ["Impacto líquido (Fin - Cont)", stats.get("impacto", 0.0)],
             ["Diferença esperada", stats.get("diff_esperada", np.nan)],
             ["Conferência do cálculo", stats.get("conferencia", np.nan)],
-        ], columns=["Métrica", "Valor"])
-        resumo.to_excel(w, index=False, sheet_name="Resumo")
-        ws3 = w.sheets["Resumo"]
-        ws3.freeze_panes(1, 0)
-        ws3.set_row(0, 20, fmt_hdr)
-        ws3.set_column(0, 0, 52)
-        ws3.set_column(1, 1, 26, wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'}))
+        ]
+
+        base_row = 10
+        for i, (metrica, valor) in enumerate(resumo_comp):
+            row = base_row + i
+            if metrica == "":
+                wsr.write_blank(row, 0, None)
+                wsr.write_blank(row, 1, None)
+            else:
+                wsr.write(row, 0, metrica, fmt_metric)
+                if pd.notna(valor):
+                    wsr.write_number(row, 1, float(valor), fmt_metric_money)
+                else:
+                    wsr.write(row, 1, "-", fmt_metric)
+
+        # Distribuição por origem
+        wsr.merge_range("D9:E9", "Distribuição por origem", fmt_section)
+        dist_origem = pd.DataFrame()
+        if len(df_res) and "ORIGEM" in df_res.columns:
+            dist_origem = (
+                df_res.groupby("ORIGEM", dropna=False)
+                .agg(Itens=("VALOR", "size"), Valor=("VALOR", "sum"))
+                .reset_index()
+                .sort_values("Valor", ascending=False)
+            )
+
+        hdr_simple = wb.add_format({
+            "bold": True, "border": 1, "bg_color": "#E2E8F0", "font_color": "#0F172A", "align": "center"
+        })
+
+        start_ro = 10
+        for j, col in enumerate(["Origem", "Itens", "Valor"]):
+            wsr.write(start_ro, 3 + j, col, hdr_simple)
+
+        if not dist_origem.empty:
+            for i, (_, rr) in enumerate(dist_origem.iterrows(), start=1):
+                wsr.write(start_ro + i, 3, rr["ORIGEM"], fmt_metric)
+                wsr.write_number(start_ro + i, 4, int(rr["Itens"]), fmt_metric)
+                wsr.write_number(start_ro + i, 5, float(rr["Valor"]), fmt_metric_money)
+
+        # Top 10
+        wsr.merge_range("G9:L9", "Top 10 pendências mais impactantes", fmt_section)
+        top_df = pd.DataFrame()
+        if len(df_res):
+            dft = df_res.copy()
+            dft["VALOR"] = dft["VALOR"].map(normalize_money)
+            dft["ABS"] = dft["VALOR"].abs()
+            mask_open = True
+            if "RESOLVIDO" in dft.columns:
+                mask_open = ~dft["RESOLVIDO"].astype(str).str.lower().eq("sim")
+            top_df = dft.loc[mask_open].sort_values("ABS", ascending=False).head(10).copy()
+
+        top_headers = ["Origem", "Data", "Documento", "Valor", "Núcleo", "Status"]
+        for j, col in enumerate(top_headers):
+            wsr.write(10, 6 + j, col, hdr_simple)
+
+        if not top_df.empty:
+            top_df = top_df.reset_index(drop=True)
+            for i, (_, rr) in enumerate(top_df.iterrows(), start=1):
+                dt = pd.to_datetime(rr.get("DATA"), errors="coerce")
+                wsr.write(10 + i, 6, rr.get("ORIGEM", ""), fmt_metric)
+                if pd.notna(dt):
+                    wsr.write_datetime(10 + i, 7, dt.to_pydatetime(), fmt_date)
+                else:
+                    wsr.write(10 + i, 7, "", fmt_metric)
+                wsr.write(10 + i, 8, str(rr.get("DOCUMENTO", "")), fmt_metric)
+                if pd.notna(rr.get("VALOR", np.nan)):
+                    wsr.write_number(10 + i, 9, float(rr.get("VALOR", 0.0)), fmt_metric_money)
+                else:
+                    wsr.write(10 + i, 9, "-", fmt_metric)
+                wsr.write(10 + i, 10, str(rr.get("NUCLEO", "Não identificado")), fmt_metric)
+                wsr.write(10 + i, 11, str(rr.get("STATUS", "")), fmt_metric)
+
+        wsr.write("A25", "Observação:", fmt_label)
+        wsr.write("B25", "A aba Divergências respeita exatamente o filtro aplicado na tela no momento da exportação.", fmt_obs)
+        wsr.freeze_panes(4, 0)
 
     out.seek(0)
     return out
@@ -1312,7 +1507,6 @@ if "div_master" not in st.session_state:
 if "upload_step" not in st.session_state:
     st.session_state.upload_step = 1
 
-# inicializa arquivos
 get_nucleos()
 load_rules()
 load_learning()
@@ -1567,6 +1761,9 @@ else:
     if "SELECIONADO" not in div_master.columns:
         div_master["SELECIONADO"] = False
 
+    div_master["NUCLEO_EXIBICAO"] = get_nucleo_display_series(div_master)
+    div_master["ORIGEM_VISUAL"] = div_master["ORIGEM"].map(origem_visual_text)
+
     st.session_state.div_master = div_master
     current_nucleos = get_nucleos()
 
@@ -1689,6 +1886,7 @@ else:
             if ok:
                 dm = st.session_state.div_master.copy()
                 dm = apply_classification_rules(dm)
+                dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
                 st.session_state.div_master = dm
                 set_flash("success", msg)
             else:
@@ -1730,6 +1928,7 @@ else:
             if ok:
                 dm = st.session_state.div_master.copy()
                 dm = apply_classification_rules(dm)
+                dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
                 st.session_state.div_master = dm
                 set_flash("success", msg)
             else:
@@ -1754,6 +1953,7 @@ else:
                     if update_rule_status("nucleo", rid, True):
                         dm = st.session_state.div_master.copy()
                         dm = apply_classification_rules(dm)
+                        dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
                         st.session_state.div_master = dm
                         set_flash("success", "Regra de núcleo ativada.")
                     else:
@@ -1764,6 +1964,7 @@ else:
                     if update_rule_status("nucleo", rid, False):
                         dm = st.session_state.div_master.copy()
                         dm = apply_classification_rules(dm)
+                        dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
                         st.session_state.div_master = dm
                         set_flash("success", "Regra de núcleo inativada.")
                     else:
@@ -1774,6 +1975,7 @@ else:
                     if delete_rule("nucleo", rid):
                         dm = st.session_state.div_master.copy()
                         dm = apply_classification_rules(dm)
+                        dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
                         st.session_state.div_master = dm
                         set_flash("success", "Regra de núcleo excluída.")
                     else:
@@ -1792,6 +1994,7 @@ else:
                     if update_rule_status("criticidade", rid2, True):
                         dm = st.session_state.div_master.copy()
                         dm = apply_classification_rules(dm)
+                        dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
                         st.session_state.div_master = dm
                         set_flash("success", "Regra de criticidade ativada.")
                     else:
@@ -1802,6 +2005,7 @@ else:
                     if update_rule_status("criticidade", rid2, False):
                         dm = st.session_state.div_master.copy()
                         dm = apply_classification_rules(dm)
+                        dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
                         st.session_state.div_master = dm
                         set_flash("success", "Regra de criticidade inativada.")
                     else:
@@ -1812,6 +2016,7 @@ else:
                     if delete_rule("criticidade", rid2):
                         dm = st.session_state.div_master.copy()
                         dm = apply_classification_rules(dm)
+                        dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
                         st.session_state.div_master = dm
                         set_flash("success", "Regra de criticidade excluída.")
                     else:
@@ -1824,13 +2029,14 @@ else:
     with st.expander("Resumo para priorização + motor de aprendizado", expanded=True):
         df_open = div_master.loc[~resolved_mask].copy()
         df_open["ABS"] = df_open["VALOR"].abs()
+        df_open["NUCLEO_EXIBICAO"] = get_nucleo_display_series(df_open)
 
         st.markdown("**Top 10 em aberto por impacto**")
         t1, t2, t3 = st.columns([1.1, 1.8, 2.1], gap="large")
         with t1:
             top_origem = st.selectbox("Origem (Top 10)", ["Todas", "Somente Financeiro", "Somente Contábil"], key="top10_origem")
         with t2:
-            nuc_opts = ["Todos"] + sorted([x for x in df_open["NUCLEO"].fillna("Não identificado").unique().tolist() if str(x).strip() != ""])
+            nuc_opts = ["Todos"] + sorted([x for x in df_open["NUCLEO_EXIBICAO"].fillna("Não identificado").unique().tolist() if str(x).strip() != ""])
             top_nucleo = st.selectbox("Núcleo (Top 10)", nuc_opts, key="top10_nucleo")
         with t3:
             st.caption("Estes filtros atuam apenas no Top 10.")
@@ -1839,11 +2045,15 @@ else:
         if top_origem != "Todas":
             top_src = top_src[top_src["ORIGEM"] == top_origem].copy()
         if top_nucleo != "Todos":
-            top_src = top_src[top_src["NUCLEO"] == top_nucleo].copy()
+            top_src = top_src[top_src["NUCLEO_EXIBICAO"] == top_nucleo].copy()
 
         top_open = top_src.sort_values("ABS", ascending=False).head(10)
-        show_cols = ["ORIGEM", "DATA", "DOCUMENTO", "VALOR", "NUCLEO"]
-        st.dataframe(top_open[show_cols].copy(), use_container_width=True, height=320)
+        show_cols = ["ORIGEM", "DATA", "DOCUMENTO", "VALOR", "NUCLEO_EXIBICAO"]
+        st.dataframe(
+            top_open[show_cols].rename(columns={"NUCLEO_EXIBICAO": "NUCLEO"}).copy(),
+            use_container_width=True,
+            height=320
+        )
 
         if len(df_open):
             st.markdown("**Distribuição por Origem (abertos)**")
@@ -1851,8 +2061,8 @@ else:
             st.dataframe(dist_origem, use_container_width=True, height=160)
 
             st.markdown("**Distribuição por Origem × Núcleo (abertos)**")
-            dist_on = df_open.groupby(["ORIGEM","NUCLEO"], dropna=False).agg(Itens=("VALOR","size"), Valor=("VALOR","sum")).reset_index().sort_values(["ORIGEM","Valor"], ascending=[True, False])
-            st.dataframe(dist_on, use_container_width=True, height=220)
+            dist_on = df_open.groupby(["ORIGEM","NUCLEO_EXIBICAO"], dropna=False).agg(Itens=("VALOR","size"), Valor=("VALOR","sum")).reset_index().sort_values(["ORIGEM","Valor"], ascending=[True, False])
+            st.dataframe(dist_on.rename(columns={"NUCLEO_EXIBICAO": "NUCLEO"}), use_container_width=True, height=220)
 
             st.markdown("**Comparativo (abertos): Financeiro × Contábil**")
             comp = df_open.groupby("ORIGEM", dropna=False)["VALOR"].sum().reset_index()
@@ -1907,6 +2117,7 @@ else:
                         if ok:
                             dm = st.session_state.div_master.copy()
                             dm = apply_classification_rules(dm)
+                            dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
                             st.session_state.div_master = dm
                             set_flash("success", msg)
                         else:
@@ -1918,8 +2129,9 @@ else:
     # =====================================================
     # Filtros
     # =====================================================
-    st.markdown("### Filtros")
-    f1, f2, f3, f4, f5 = st.columns([1.1, 1.05, 1.05, 2.3, 1.0], gap="large")
+    st.markdown("### Filtros de análise")
+
+    f1, f2, f3, f4 = st.columns([1.0, 1.1, 1.0, 2.2], gap="large")
     with f1:
         origem = st.selectbox("Origem", ["Todas", "Somente Financeiro", "Somente Contábil"])
     with f2:
@@ -1927,11 +2139,20 @@ else:
     with f3:
         sev = st.selectbox("Severidade", ["Todas", "Normal", "Atenção", "Crítica"])
     with f4:
-        busca = st.text_input("Buscar (inclui valor)", value="")
+        busca = st.text_input("Buscar (documento, histórico, valor, núcleo)", value="")
+
+    f5, f6, f7, f8 = st.columns([1.2, 1.0, 1.0, 1.0], gap="large")
     with f5:
+        nucleo_filtro = st.selectbox("Núcleo", ["Todos"] + get_nucleos())
+    with f6:
+        status_filtro = st.selectbox("Status", ["Todos"] + STATUS_OPTS)
+    with f7:
+        confirmado_filtro = st.selectbox("Confirmado", ["Todos", "Sim", "Não"])
+    with f8:
         st.markdown("<div style='height:1px'></div>", unsafe_allow_html=True)
 
     df = div_master.copy()
+    df["NUCLEO_EXIBICAO"] = get_nucleo_display_series(df)
 
     if origem != "Todas":
         df = df[df["ORIGEM"] == origem].copy()
@@ -1945,10 +2166,21 @@ else:
     if sev != "Todas":
         df = df[df["SEVERIDADE"] == sev].copy()
 
+    if nucleo_filtro != "Todos":
+        df = df[df["NUCLEO_EXIBICAO"] == nucleo_filtro].copy()
+
+    if status_filtro != "Todos":
+        df = df[df["STATUS"] == status_filtro].copy()
+
+    if confirmado_filtro != "Todos":
+        want = confirmado_filtro == "Sim"
+        df = df[df["CONFIRMADO"].fillna(False) == want].copy()
+
     if busca.strip():
         q = busca.strip().lower()
-        cols_search = ["DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "NUCLEO", "ORIGEM", "SEVERIDADE"]
-        mask = False
+        mask = pd.Series(False, index=df.index)
+
+        cols_search = ["DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "NUCLEO", "NUCLEO_EXIBICAO", "ORIGEM", "SEVERIDADE", "STATUS", "OBS_USUARIO"]
         for c in cols_search:
             if c in df.columns:
                 mask = mask | df[c].astype(str).str.lower().str.contains(q, na=False)
@@ -1959,7 +2191,7 @@ else:
         df = df[mask].copy()
 
     total_filtrado = float(df["VALOR"].sum()) if not df.empty else 0.0
-    with f5:
+    with f8:
         st.markdown(
             f"""
 <div class="cm-mini">
@@ -1970,43 +2202,48 @@ else:
             unsafe_allow_html=True,
         )
 
-    if "DATA" in df.columns:
-        df["DATA"] = pd.to_datetime(df["DATA"], errors="coerce")
-    df = df.sort_values(by=["DATA", "VALOR"], ascending=[True, True])
+    dfx = build_sort_columns(df)
+    dfx = dfx.sort_values(
+        by=["__RES", "__SEV_ORD", "__ABS_VAL", "__DATA_SORT"],
+        ascending=[True, False, False, True]
+    )
+    df = dfx.drop(columns=["__RES", "__SEV_ORD", "__ABS_VAL", "__DATA_SORT"], errors="ignore")
 
     # =====================================================
     # Ações em massa
     # =====================================================
     st.markdown("### Ações em massa")
-    st.markdown('<div class="cm-help">Agora também é possível definir o núcleo final em massa.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cm-help">A experiência foi reorganizada para facilitar seleção, escopo e aplicação das alterações.</div>', unsafe_allow_html=True)
 
     ids_filtrados = list(df.index)
     dm0 = st.session_state.div_master.copy()
     selecionados_count = int(dm0["SELECIONADO"].fillna(False).sum())
 
-    with st.container():
-        st.markdown('<div class="cm-actionbar">', unsafe_allow_html=True)
-        a1, a2, a3 = st.columns([1.2, 1.2, 2.2], gap="large")
-        with a1:
-            if st.button("Selecionar todos do filtro"):
-                dm = st.session_state.div_master.copy()
-                dm.loc[ids_filtrados, "SELECIONADO"] = True
-                st.session_state.div_master = dm
-                st.rerun()
-        with a2:
-            if st.button("Limpar seleção do filtro"):
-                dm = st.session_state.div_master.copy()
-                dm.loc[ids_filtrados, "SELECIONADO"] = False
-                st.session_state.div_master = dm
-                st.rerun()
-        with a3:
-            st.markdown(f'<span class="cm-badge">Selecionados: {selecionados_count}</span>', unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('<div class="cm-actionbar">', unsafe_allow_html=True)
+    s1, s2, s3, s4 = st.columns([1.2, 1.2, 1.0, 2.0], gap="large")
+    with s1:
+        if st.button("Selecionar todos do filtro", use_container_width=True):
+            dm = st.session_state.div_master.copy()
+            dm.loc[ids_filtrados, "SELECIONADO"] = True
+            st.session_state.div_master = dm
+            st.rerun()
+    with s2:
+        if st.button("Limpar seleção do filtro", use_container_width=True):
+            dm = st.session_state.div_master.copy()
+            dm.loc[ids_filtrados, "SELECIONADO"] = False
+            st.session_state.div_master = dm
+            st.rerun()
+    with s3:
+        st.markdown(f'<span class="cm-badge">Selecionados: {selecionados_count}</span>', unsafe_allow_html=True)
+    with s4:
+        st.markdown(f'<div class="cm-subtle">Itens atualmente no filtro: <b>{len(ids_filtrados)}</b></div>', unsafe_allow_html=True)
 
-    scope = st.radio("Aplicar em:", ["Selecionados", "Todos do filtro"], horizontal=True)
+    scope = st.radio("Escopo da ação", ["Selecionados", "Todos do filtro"], horizontal=True)
     target_ids = list(dm0.index[dm0["SELECIONADO"].fillna(False)]) if scope == "Selecionados" else ids_filtrados
 
-    bA, bB, bC, bD, bE, bF = st.columns([1.0, 1.0, 1.2, 1.5, 1.8, 1.0], gap="large")
+    st.markdown(f'<div class="cm-subtle">A ação será aplicada em <b>{len(target_ids)}</b> item(ns).</div>', unsafe_allow_html=True)
+
+    bA, bB, bC, bD, bE, bF = st.columns([1.0, 1.0, 1.2, 1.5, 1.9, 1.0], gap="large")
     with bA:
         bulk_confirm = st.selectbox("Confirmado", ["(não alterar)", "Sim", "Não"])
     with bB:
@@ -2020,6 +2257,8 @@ else:
     with bF:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         do_apply = st.button("Aplicar", type="primary", disabled=(len(target_ids) == 0), use_container_width=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if do_apply:
         dm = st.session_state.div_master.copy()
@@ -2054,6 +2293,7 @@ else:
 
         dm.loc[target_ids, "SELECIONADO"] = False
         save_learning_examples(dm.loc[target_ids].copy())
+        dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
         st.session_state.div_master = dm
         set_flash("success", f"Ação aplicada em {len(target_ids)} itens.")
         st.rerun()
@@ -2062,11 +2302,11 @@ else:
     # Tratativa
     # =====================================================
     st.markdown("### Tratativa (tabela)")
-    st.markdown('<div class="cm-help">Mantido o histórico para contexto. A coluna operacional final é NÚCLEO.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cm-help">Mantido o histórico para contexto. A coluna operacional final continua sendo NÚCLEO.</div>', unsafe_allow_html=True)
 
     view_cols = [
         "SELECIONADO",
-        "ORIGEM",
+        "ORIGEM_VISUAL",
         "SEVERIDADE",
         "DATA",
         "DOCUMENTO",
@@ -2084,8 +2324,8 @@ else:
     df_view_display["DATA"] = pd.to_datetime(df_view_display["DATA"], errors="coerce").dt.strftime("%d/%m/%Y").fillna("")
 
     column_config = {
-        "SELECIONADO": st.column_config.CheckboxColumn(),
-        "ORIGEM": st.column_config.TextColumn(disabled=True),
+        "SELECIONADO": st.column_config.CheckboxColumn("Selecionar"),
+        "ORIGEM_VISUAL": st.column_config.TextColumn("Origem", disabled=True),
         "SEVERIDADE": st.column_config.TextColumn(disabled=True),
         "DATA": st.column_config.TextColumn(disabled=True),
         "DOCUMENTO": st.column_config.TextColumn(disabled=True),
@@ -2096,13 +2336,13 @@ else:
         "NUCLEO": st.column_config.SelectboxColumn(options=get_nucleos()),
         "STATUS": st.column_config.SelectboxColumn(options=STATUS_OPTS),
         "RESOLVIDO": st.column_config.CheckboxColumn(),
-        "OBS_USUARIO": st.column_config.TextColumn(),
+        "OBS_USUARIO": st.column_config.TextColumn("Observação"),
     }
 
     edited = st.data_editor(
         df_view_display,
         use_container_width=True,
-        height=560,
+        height=580,
         column_config=column_config,
         key="editor_tratativa",
         hide_index=False,
@@ -2120,13 +2360,14 @@ else:
         for c in upd_cols:
             dm.loc[to_update.index, c] = to_update[c].values
 
-        # se confirmou e ainda estiver sem núcleo, leva o sugerido
         need = dm.loc[to_update.index, "CONFIRMADO"].fillna(False) & dm.loc[to_update.index, "NUCLEO"].astype(str).str.strip().isin(["", "Não identificado"])
         idx_need = list(pd.Index(to_update.index)[need.values])
         if len(idx_need) > 0:
             dm.loc[idx_need, "NUCLEO"] = dm.loc[idx_need, "NUCLEO_SUGERIDO"].fillna("Não identificado")
 
         save_learning_examples(dm.loc[to_update.index].copy())
+        dm["NUCLEO_EXIBICAO"] = get_nucleo_display_series(dm)
+        dm["ORIGEM_VISUAL"] = dm["ORIGEM"].map(origem_visual_text)
         st.session_state.div_master = dm
         div_master = dm.copy()
 
@@ -2203,7 +2444,15 @@ else:
     # Export
     # =====================================================
     st.markdown("### Exportar")
-    filtros = {"origem": origem, "ver": ver, "severidade": sev, "busca": busca.strip(), "_total_aberto": valor_aberto}
+    filtros = {
+        "origem": origem,
+        "ver": ver,
+        "severidade": sev,
+        "nucleo": nucleo_filtro,
+        "status": status_filtro,
+        "busca": busca.strip(),
+        "_total_aberto": valor_aberto
+    }
 
     export_cols = [
         "ORIGEM",
