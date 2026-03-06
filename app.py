@@ -1586,7 +1586,19 @@ def render_cruzamento_inteligente_v2():
         dup_df = dup_df.sort_values([key_col_name])
         return dup_df
 
-    def _to_excel_package(df_result, resumo_dict, dup_a_df=None, dup_b_df=None):
+    def _dedupe_keep_first(df_base, key_col_name="__KEY__"):
+        if key_col_name not in df_base.columns:
+            return df_base.copy()
+        return df_base.drop_duplicates(subset=[key_col_name], keep="first").copy()
+
+    def _to_excel_package(
+        df_result,
+        resumo_dict,
+        dup_a_df=None,
+        dup_b_df=None,
+        base_a_sem_dup=None,
+        base_b_sem_dup=None,
+    ):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             wb = writer.book
@@ -1595,11 +1607,11 @@ def render_cruzamento_inteligente_v2():
                 "bold": True, "bg_color": "#DBEAFE", "border": 1,
                 "align": "center", "valign": "vcenter"
             })
-            fmt_txt = wb.add_format({"border": 1, "text_wrap": True})
-            fmt_num = wb.add_format({"border": 1, "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'})
-            fmt_title = wb.add_format({"bold": True, "font_size": 14})
-            fmt_label = wb.add_format({"bold": True, "border": 1, "bg_color": "#F1F5F9"})
+            fmt_label = wb.add_format({
+                "bold": True, "border": 1, "bg_color": "#F1F5F9"
+            })
             fmt_value = wb.add_format({"border": 1})
+            fmt_title = wb.add_format({"bold": True, "font_size": 14})
 
             # Resumo executivo
             resumo_df = pd.DataFrame([
@@ -1612,14 +1624,16 @@ def render_cruzamento_inteligente_v2():
                 ["Duplicidades na Base B", resumo_dict.get("dup_b", 0)],
                 ["Divergências", resumo_dict.get("divergentes", 0)],
                 ["Aderência (%)", resumo_dict.get("aderencia", 0.0)],
+                ["Base A sem duplicados", resumo_dict.get("base_a_sem_dup_qtd", 0)],
+                ["Base B sem duplicados", resumo_dict.get("base_b_sem_dup_qtd", 0)],
             ], columns=["Indicador", "Valor"])
 
             resumo_df.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False)
             wsr = writer.sheets["RESUMO_EXECUTIVO"]
-            wsr.set_column(0, 0, 28)
-            wsr.set_column(1, 1, 22)
-            for c, col in enumerate(resumo_df.columns):
-                wsr.write(0, c, col, fmt_hdr)
+            wsr.write(0, 0, "Indicador", fmt_hdr)
+            wsr.write(0, 1, "Valor", fmt_hdr)
+            wsr.set_column(0, 0, 30)
+            wsr.set_column(1, 1, 20)
             for r in range(1, len(resumo_df) + 1):
                 wsr.write(r, 0, resumo_df.iloc[r - 1, 0], fmt_label)
                 wsr.write(r, 1, resumo_df.iloc[r - 1, 1], fmt_value)
@@ -1629,18 +1643,26 @@ def render_cruzamento_inteligente_v2():
             df_nao.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
 
             # Duplicidades
-            if dup_a_df is not None:
+            if dup_a_df is not None and not dup_a_df.empty:
                 dup_a_df.to_excel(writer, sheet_name="DUP_BASE_A", index=False)
-            if dup_b_df is not None:
+            if dup_b_df is not None and not dup_b_df.empty:
                 dup_b_df.to_excel(writer, sheet_name="DUP_BASE_B", index=False)
 
-            # Completo
+            # Bases sem duplicados
+            if base_a_sem_dup is not None and not base_a_sem_dup.empty:
+                base_a_sem_dup.to_excel(writer, sheet_name="BASE_A_SEM_DUPLICADOS", index=False)
+            if base_b_sem_dup is not None and not base_b_sem_dup.empty:
+                base_b_sem_dup.to_excel(writer, sheet_name="BASE_B_SEM_DUPLICADOS", index=False)
+
+            # Resultado completo
             df_result.to_excel(writer, sheet_name="RESULTADO_COMPLETO", index=False)
 
             for sheet_name, df_sheet in {
                 "NAO_ENCONTRADOS": df_nao,
                 "DUP_BASE_A": dup_a_df if dup_a_df is not None else pd.DataFrame(),
                 "DUP_BASE_B": dup_b_df if dup_b_df is not None else pd.DataFrame(),
+                "BASE_A_SEM_DUPLICADOS": base_a_sem_dup if base_a_sem_dup is not None else pd.DataFrame(),
+                "BASE_B_SEM_DUPLICADOS": base_b_sem_dup if base_b_sem_dup is not None else pd.DataFrame(),
                 "RESULTADO_COMPLETO": df_result
             }.items():
                 if sheet_name in writer.sheets:
@@ -1649,10 +1671,10 @@ def render_cruzamento_inteligente_v2():
                         for c, col in enumerate(df_sheet.columns):
                             ws.write(0, c, col, fmt_hdr)
                             sample = [str(col)] + df_sheet[col].astype(str).head(200).tolist()
-                            width = min(max(max(len(x) for x in sample) + 2, 12), 40)
+                            width = min(max(max(len(x) for x in sample) + 2, 12), 42)
                             ws.set_column(c, c, width)
 
-            output.seek(0)
+        output.seek(0)
         return output
 
     # 1) Objetivo
@@ -1673,10 +1695,10 @@ def render_cruzamento_inteligente_v2():
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Base A — referência**")
-        base_a_file = st.file_uploader("Upload Base A (.xlsx ou .csv)", type=["xlsx", "csv"], key="ci_v3_a")
+        base_a_file = st.file_uploader("Upload Base A (.xlsx ou .csv)", type=["xlsx", "csv"], key="ci_v4_a")
     with c2:
         st.markdown("**Base B — base a validar / confrontar**")
-        base_b_file = st.file_uploader("Upload Base B (.xlsx ou .csv)", type=["xlsx", "csv"], key="ci_v3_b")
+        base_b_file = st.file_uploader("Upload Base B (.xlsx ou .csv)", type=["xlsx", "csv"], key="ci_v4_b")
 
     if not base_a_file or not base_b_file:
         st.info("Faça o upload das duas bases para continuar.")
@@ -1727,9 +1749,9 @@ def render_cruzamento_inteligente_v2():
     for i in range(int(qtd_rel)):
         ra, rb = st.columns(2)
         with ra:
-            campo_a = st.selectbox(f"Campo Base A #{i+1}", list(df_a.columns), key=f"v3_rel_a_{i}")
+            campo_a = st.selectbox(f"Campo Base A #{i+1}", list(df_a.columns), key=f"v4_rel_a_{i}")
         with rb:
-            campo_b = st.selectbox(f"Campo Base B #{i+1}", list(df_b.columns), key=f"v3_rel_b_{i}")
+            campo_b = st.selectbox(f"Campo Base B #{i+1}", list(df_b.columns), key=f"v4_rel_b_{i}")
         relacionamento.append((campo_a, campo_b))
 
     key_a = [x[0] for x in relacionamento]
@@ -1742,10 +1764,6 @@ def render_cruzamento_inteligente_v2():
     preserve_as_text = st.checkbox("Tratar campos-chave como texto", value=True)
     aplicar_zeros = st.checkbox("Aplicar zeros à esquerda em campos específicos", value=False)
 
-    st.markdown("### 7) Validações adicionais (opcional)")
-    validar_dup_a = st.checkbox("Verificar duplicidades na Base A", value=False)
-    validar_dup_b = st.checkbox("Verificar duplicidades na Base B", value=False)
-
     rules_a = {}
     rules_b = {}
 
@@ -1757,14 +1775,14 @@ def render_cruzamento_inteligente_v2():
                     f"Tamanho fixo Base A — {ca}",
                     options=["Sem ajuste", "2", "3", "4", "5", "6"],
                     index=0,
-                    key=f"v3_pad_a_{i}"
+                    key=f"v4_pad_a_{i}"
                 )
             with z2:
                 pad_b = st.selectbox(
                     f"Tamanho fixo Base B — {cb}",
                     options=["Sem ajuste", "2", "3", "4", "5", "6"],
                     index=0,
-                    key=f"v3_pad_b_{i}"
+                    key=f"v4_pad_b_{i}"
                 )
 
             rules_a[ca] = {
@@ -1782,6 +1800,13 @@ def render_cruzamento_inteligente_v2():
             rules_a[ca] = {"as_text": preserve_as_text, "pad_size": None, "ignore_spaces": ignore_spaces}
             rules_b[cb] = {"as_text": preserve_as_text, "pad_size": None, "ignore_spaces": ignore_spaces}
 
+    # 7) Validações adicionais
+    st.markdown("### 7) Validações adicionais (opcional)")
+    validar_dup_a = st.checkbox("Verificar duplicidades na Base A", value=False)
+    validar_dup_b = st.checkbox("Verificar duplicidades na Base B", value=False)
+    gerar_base_a_sem_dup = st.checkbox("Gerar Base A sem duplicados", value=False)
+    gerar_base_b_sem_dup = st.checkbox("Gerar Base B sem duplicados", value=False)
+
     # 8) Configuração do resultado
     st.markdown("### 8) Configuração do resultado")
     retorno_cols = []
@@ -1797,9 +1822,9 @@ def render_cruzamento_inteligente_v2():
         comparar_valores = True
         cva, cvb, cvt = st.columns([1.2, 1.2, 0.8])
         with cva:
-            valor_a = st.selectbox("Campo numérico Base A", list(df_a.columns), key="v3_valor_a")
+            valor_a = st.selectbox("Campo numérico Base A", list(df_a.columns), key="v4_valor_a")
         with cvb:
-            valor_b = st.selectbox("Campo numérico Base B", list(df_b.columns), key="v3_valor_b")
+            valor_b = st.selectbox("Campo numérico Base B", list(df_b.columns), key="v4_valor_b")
         with cvt:
             tolerancia = st.number_input("Tolerância", min_value=0.0, value=0.01, step=0.01)
 
@@ -1818,6 +1843,9 @@ def render_cruzamento_inteligente_v2():
 
         dup_a_df = _find_duplicates(base_a) if validar_dup_a else pd.DataFrame()
         dup_b_df = _find_duplicates(base_b) if validar_dup_b else pd.DataFrame()
+
+        base_a_sem_dup = _dedupe_keep_first(base_a) if gerar_base_a_sem_dup else pd.DataFrame()
+        base_b_sem_dup = _dedupe_keep_first(base_b) if gerar_base_b_sem_dup else pd.DataFrame()
 
         dup_a = set(base_a["__KEY__"].value_counts()[lambda s: s > 1].index.tolist())
         dup_b = set(base_b["__KEY__"].value_counts()[lambda s: s > 1].index.tolist())
@@ -1910,6 +1938,10 @@ def render_cruzamento_inteligente_v2():
         st.markdown(f"**Duplicidades encontradas na Base A:** {len(dup_a_df)}")
     if validar_dup_b:
         st.markdown(f"**Duplicidades encontradas na Base B:** {len(dup_b_df)}")
+    if gerar_base_a_sem_dup:
+        st.markdown(f"**Base A sem duplicados:** {len(base_a_sem_dup)} registro(s)")
+    if gerar_base_b_sem_dup:
+        st.markdown(f"**Base B sem duplicados:** {len(base_b_sem_dup)} registro(s)")
     if comparar_valores:
         st.markdown(f"**Divergências de valor:** {divergentes}")
 
@@ -1925,19 +1957,23 @@ def render_cruzamento_inteligente_v2():
         "dup_b": len(dup_b_df),
         "divergentes": divergentes,
         "aderencia": round(aderencia, 2),
+        "base_a_sem_dup_qtd": len(base_a_sem_dup) if gerar_base_a_sem_dup else 0,
+        "base_b_sem_dup_qtd": len(base_b_sem_dup) if gerar_base_b_sem_dup else 0,
     }
 
     excel_bytes = _to_excel_package(
         df_result=df_result,
         resumo_dict=resumo_dict,
         dup_a_df=dup_a_df if validar_dup_a else None,
-        dup_b_df=dup_b_df if validar_dup_b else None
+        dup_b_df=dup_b_df if validar_dup_b else None,
+        base_a_sem_dup=base_a_sem_dup if gerar_base_a_sem_dup else None,
+        base_b_sem_dup=base_b_sem_dup if gerar_base_b_sem_dup else None,
     )
 
     st.download_button(
         "Baixar resultado em Excel",
         data=excel_bytes,
-        file_name=f"Cruzamento_Inteligente_V3_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        file_name=f"Cruzamento_Inteligente_V4_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
