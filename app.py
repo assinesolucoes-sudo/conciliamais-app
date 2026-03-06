@@ -1586,7 +1586,7 @@ def render_cruzamento_inteligente_v2():
         dup_df = dup_df.sort_values([key_col_name])
         return dup_df
 
-     def _dedupe_keep_first(df_base, key_col_name="__KEY__"):
+    def _dedupe_keep_first(df_base, key_col_name="__KEY__"):
         if key_col_name not in df_base.columns:
             return df_base.copy()
         return df_base.drop_duplicates(subset=[key_col_name], keep="first").copy()
