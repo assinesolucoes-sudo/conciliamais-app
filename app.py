@@ -22,6 +22,18 @@ st.set_page_config(page_title="ConciliaMais — Conferência de Extrato Bancári
 
 RULES_FILE = "regras.json"
 LEARNING_FILE = "aprendizado.json"
+NUCLEOS_FILE = "nucleos.json"
+
+DEFAULT_NUCLEOS = [
+    "Processo interno",
+    "Cadastro",
+    "Configuração ERP",
+    "Não identificado",
+]
+
+STATUS_OPTS = ["Pendente", "Em análise", "Resolvido"]
+SEVERIDADES = ["Normal", "Atenção", "Crítica"]
+ORIGEM_RULE_OPTS = ["Qualquer", "Somente Financeiro", "Somente Contábil"]
 
 # =========================================================
 # CSS
@@ -49,13 +61,6 @@ body { background: var(--bg) !important; }
   max-width: 1450px;
 }
 
-.cm-shell {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  padding: 14px;
-  box-shadow: var(--shadow);
-}
 .cm-help { color: var(--muted); font-size: 13px; margin-top: -6px; }
 .cm-section { margin-top: 16px; }
 
@@ -153,14 +158,6 @@ div.stButton > button[kind="primary"]:hover{
 )
 
 # =========================================================
-# Constantes
-# =========================================================
-NUCLEOS = ["Processo interno", "Cadastro", "Configuração RP", "Não identificado"]
-STATUS_OPTS = ["Pendente", "Em análise", "Resolvido"]
-SEVERIDADES = ["Normal", "Atenção", "Crítica"]
-ORIGEM_RULE_OPTS = ["Qualquer", "Somente Financeiro", "Somente Contábil"]
-
-# =========================================================
 # Helpers gerais
 # =========================================================
 def set_flash(kind, msg):
@@ -235,6 +232,125 @@ def pill_calculo(conferencia):
     return '<span class="cm-pill cm-bad">Inconsistente</span>'
 
 # =========================================================
+# Núcleos persistentes
+# =========================================================
+def default_nucleos_payload():
+    return {"nucleos": DEFAULT_NUCLEOS}
+
+def save_nucleos(payload):
+    with open(NUCLEOS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+def load_nucleos():
+    if not os.path.exists(NUCLEOS_FILE):
+        payload = default_nucleos_payload()
+        save_nucleos(payload)
+        return payload["nucleos"]
+    try:
+        with open(NUCLEOS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        nucs = data.get("nucleos", DEFAULT_NUCLEOS)
+        nucs = [str(x).strip() for x in nucs if str(x).strip()]
+        # garante defaults
+        for d in DEFAULT_NUCLEOS:
+            if d not in nucs:
+                nucs.append(d)
+        # remove RP legado
+        nucs = ["Configuração ERP" if x == "Configuração RP" else x for x in nucs]
+        # Não identificado sempre por último
+        nucs = [x for x in nucs if x != "Não identificado"] + ["Não identificado"]
+        save_nucleos({"nucleos": nucs})
+        return nucs
+    except Exception:
+        payload = default_nucleos_payload()
+        save_nucleos(payload)
+        return payload["nucleos"]
+
+def get_nucleos():
+    return load_nucleos()
+
+def add_nucleo(nome):
+    nome = str(nome).strip()
+    if not nome:
+        return False, "Informe o nome do núcleo."
+    nucs = get_nucleos()
+    if nome in nucs:
+        return False, "Esse núcleo já existe."
+    nucs = [x for x in nucs if x != "Não identificado"] + [nome, "Não identificado"]
+    save_nucleos({"nucleos": nucs})
+    return True, f'Núcleo "{nome}" criado com sucesso.'
+
+def rename_nucleo(old_name, new_name):
+    old_name = str(old_name).strip()
+    new_name = str(new_name).strip()
+    if old_name not in get_nucleos():
+        return False, "Núcleo de origem não encontrado."
+    if not new_name:
+        return False, "Informe o novo nome do núcleo."
+    if new_name in get_nucleos() and new_name != old_name:
+        return False, "Já existe um núcleo com esse nome."
+    if old_name == "Não identificado":
+        return False, 'O núcleo "Não identificado" não pode ser renomeado.'
+
+    nucs = get_nucleos()
+    nucs = [new_name if x == old_name else x for x in nucs]
+    save_nucleos({"nucleos": nucs})
+
+    # atualiza regras
+    payload = load_rules()
+    for bucket in ["nucleo_rules"]:
+        for r in payload[bucket]:
+            if str(r.get("resultado", "")).strip() == old_name:
+                r["resultado"] = new_name
+    save_rules(payload)
+
+    # atualiza aprendizado
+    learning = load_learning()
+    for ex in learning["examples"]:
+        if str(ex.get("nucleo_sugerido", "")).strip() == old_name:
+            ex["nucleo_sugerido"] = new_name
+        if str(ex.get("nucleo_final", "")).strip() == old_name:
+            ex["nucleo_final"] = new_name
+    save_learning(learning)
+
+    # atualiza sessão
+    if st.session_state.get("div_master") is not None:
+        dm = st.session_state.div_master.copy()
+        for c in ["NUCLEO", "NUCLEO_SUGERIDO"]:
+            if c in dm.columns:
+                dm[c] = dm[c].replace({old_name: new_name})
+        st.session_state.div_master = dm
+
+    return True, f'Núcleo "{old_name}" renomeado para "{new_name}".'
+
+def delete_nucleo(nome):
+    nome = str(nome).strip()
+    if nome in DEFAULT_NUCLEOS:
+        return False, "Esse núcleo padrão não pode ser excluído."
+    nucs = get_nucleos()
+    if nome not in nucs:
+        return False, "Núcleo não encontrado."
+
+    nucs = [x for x in nucs if x != nome]
+    save_nucleos({"nucleos": nucs})
+
+    # regras que apontam para esse núcleo vão para Não identificado
+    payload = load_rules()
+    for r in payload["nucleo_rules"]:
+        if str(r.get("resultado", "")).strip() == nome:
+            r["resultado"] = "Não identificado"
+    save_rules(payload)
+
+    if st.session_state.get("div_master") is not None:
+        dm = st.session_state.div_master.copy()
+        for c in ["NUCLEO", "NUCLEO_SUGERIDO"]:
+            if c in dm.columns:
+                dm[c] = dm[c].replace({nome: "Não identificado"})
+        st.session_state.div_master = dm
+
+    return True, f'Núcleo "{nome}" excluído com sucesso.'
+
+# =========================================================
 # Persistência de regras
 # =========================================================
 def default_rules_payload():
@@ -252,6 +368,11 @@ def load_rules():
             data = default_rules_payload()
         data.setdefault("nucleo_rules", [])
         data.setdefault("criticidade_rules", [])
+        # migração RP -> ERP
+        for r in data["nucleo_rules"]:
+            if str(r.get("resultado", "")) == "Configuração RP":
+                r["resultado"] = "Configuração ERP"
+        save_rules(data)
         return data
     except Exception:
         payload = default_rules_payload()
@@ -349,6 +470,12 @@ def load_learning():
         if not isinstance(data, dict):
             data = default_learning_payload()
         data.setdefault("examples", [])
+        for ex in data["examples"]:
+            if str(ex.get("nucleo_sugerido", "")) == "Configuração RP":
+                ex["nucleo_sugerido"] = "Configuração ERP"
+            if str(ex.get("nucleo_final", "")) == "Configuração RP":
+                ex["nucleo_final"] = "Configuração ERP"
+        save_learning(data)
         return data
     except Exception:
         payload = default_learning_payload()
@@ -417,7 +544,6 @@ def build_learning_suggestions(div_master):
                 "MOTIVO_BASE": motivo,
                 "NUCLEO_FINAL": nucleo_final,
                 "VALOR": safe_float(ex.get("valor", 0.0), 0.0),
-                "FONTE": "Aprendizado",
             })
 
     df = div_master.copy()
@@ -435,7 +561,6 @@ def build_learning_suggestions(div_master):
                 "MOTIVO_BASE": str(r.get("MOTIVO_BASE", "")),
                 "NUCLEO_FINAL": str(r.get("NUCLEO", "")),
                 "VALOR": abs(safe_float(r.get("VALOR", 0.0), 0.0)),
-                "FONTE": "Sessão atual",
             })
 
     if not rows:
@@ -659,8 +784,8 @@ def suggest_nucleo_base(row):
     if "somente financeiro" in origem and (doc != "" or "mov" in hist or "titulo" in hist or "título" in hist):
         return "Cadastro"
 
-    if any(k in hist for k in ["rp", "reprocess", "rotina", "processamento", "integracao", "integração"]):
-        return "Configuração RP"
+    if any(k in hist for k in ["erp", "rp", "reprocess", "rotina", "processamento", "integracao", "integração"]):
+        return "Configuração ERP"
 
     return "Não identificado"
 
@@ -918,7 +1043,7 @@ def reconcile(fin_df, led_df, cfg, date_tol_days=0):
     return div, stats
 
 # =========================================================
-# Excel Export (limpo)
+# Excel Export (limpo + histórico + núcleo final)
 # =========================================================
 def _autofit_worksheet(ws, df, start_col, max_width=70, min_width=10):
     for j, col in enumerate(df.columns):
@@ -937,7 +1062,7 @@ def to_excel_divergencias_filtradas(df_filtrado, filtros, stats, generated_at):
         fmt_k = wb.add_format({"bold": True, "font_size": 10, "font_color": "#334155"})
         fmt_info = wb.add_format({"font_size": 10, "font_color": "#334155"})
         fmt_hdr = wb.add_format({"bold": True, "border": 1, "align": "center", "valign": "vcenter", "bg_color": "#DBEAFE", "font_color": "#0F172A"})
-        fmt_txt = wb.add_format({"border": 1})
+        fmt_txt = wb.add_format({"border": 1, "text_wrap": True, "valign": "top"})
         fmt_date = wb.add_format({"num_format": "dd/mm/yyyy", "border": 1})
         fmt_money = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "border": 1})
         fmt_money_big = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00', "bold": True})
@@ -986,6 +1111,7 @@ def to_excel_divergencias_filtradas(df_filtrado, filtros, stats, generated_at):
 
         for r in range(len(df2)):
             excel_r = start_row_table + 1 + r
+            ws.set_row(excel_r, 34)
             for j, col in enumerate(df2.columns):
                 val = df2.iloc[r, j]
                 if col == "DATA":
@@ -1185,6 +1311,11 @@ if "div_master" not in st.session_state:
     st.session_state.div_master = None
 if "upload_step" not in st.session_state:
     st.session_state.upload_step = 1
+
+# inicializa arquivos
+get_nucleos()
+load_rules()
+load_learning()
 
 # =========================================================
 # Sidebar
@@ -1437,6 +1568,7 @@ else:
         div_master["SELECIONADO"] = False
 
     st.session_state.div_master = div_master
+    current_nucleos = get_nucleos()
 
     resolved_mask = div_master["RESOLVIDO"] | (div_master["STATUS"].str.lower().eq("resolvido"))
     total_itens = len(div_master)
@@ -1476,6 +1608,48 @@ else:
     st.markdown('<div class="cm-section"></div>', unsafe_allow_html=True)
 
     # =====================================================
+    # Biblioteca de núcleos
+    # =====================================================
+    with st.expander("Biblioteca de núcleos", expanded=False):
+        st.markdown("#### Núcleos disponíveis")
+        nuc_df = pd.DataFrame({"NUCLEO": current_nucleos})
+        st.dataframe(nuc_df, use_container_width=True, height=220)
+
+        n1, n2, n3 = st.columns(3)
+
+        with n1:
+            st.markdown("**Criar núcleo**")
+            with st.form("form_add_nucleo", clear_on_submit=True):
+                novo_nucleo = st.text_input("Novo núcleo")
+                submit_add_nucleo = st.form_submit_button("Criar núcleo", type="primary")
+            if submit_add_nucleo:
+                ok, msg = add_nucleo(novo_nucleo)
+                set_flash("success" if ok else "warning", msg)
+                st.rerun()
+
+        with n2:
+            st.markdown("**Renomear núcleo**")
+            with st.form("form_rename_nucleo", clear_on_submit=True):
+                old_nucleo = st.selectbox("Núcleo atual", current_nucleos, key="old_nucleo")
+                new_nucleo = st.text_input("Novo nome")
+                submit_rename_nucleo = st.form_submit_button("Renomear núcleo", type="primary")
+            if submit_rename_nucleo:
+                ok, msg = rename_nucleo(old_nucleo, new_nucleo)
+                set_flash("success" if ok else "warning", msg)
+                st.rerun()
+
+        with n3:
+            st.markdown("**Excluir núcleo customizado**")
+            custom_nucleos = [x for x in current_nucleos if x not in DEFAULT_NUCLEOS]
+            with st.form("form_delete_nucleo", clear_on_submit=False):
+                del_nucleo = st.selectbox("Núcleo para excluir", custom_nucleos if custom_nucleos else ["(nenhum)"])
+                submit_delete_nucleo = st.form_submit_button("Excluir núcleo", type="primary", disabled=(len(custom_nucleos) == 0))
+            if submit_delete_nucleo and custom_nucleos:
+                ok, msg = delete_nucleo(del_nucleo)
+                set_flash("success" if ok else "warning", msg)
+                st.rerun()
+
+    # =====================================================
     # Biblioteca de regras
     # =====================================================
     with st.expander("Biblioteca de regras (persistente)", expanded=False):
@@ -1494,7 +1668,7 @@ else:
                 nr_valor_min = st.text_input("Valor mínimo abs")
                 nr_valor_max = st.text_input("Valor máximo abs")
             with c3:
-                nr_resultado = st.selectbox("Resultado", NUCLEOS)
+                nr_resultado = st.selectbox("Resultado", get_nucleos())
                 nr_prioridade = st.number_input("Prioridade", min_value=1, value=100, step=1)
                 nr_ativa = st.checkbox("Ativa", value=True)
                 salvar_nucleo = st.form_submit_button("Salvar regra de Núcleo", type="primary")
@@ -1645,7 +1819,7 @@ else:
                     st.rerun()
 
     # =====================================================
-    # Resumo / priorização / IA operacional
+    # Resumo / motor de aprendizado
     # =====================================================
     with st.expander("Resumo para priorização + motor de aprendizado", expanded=True):
         df_open = div_master.loc[~resolved_mask].copy()
@@ -1700,17 +1874,17 @@ else:
             motivos = motivos.sort_values(["Itens", "ABS_IMPACTO"], ascending=[False, False])
             st.dataframe(motivos[["MOTIVO_BASE", "ORIGEM", "Itens", "Impacto", "Maior_Valor"]].head(25), use_container_width=True, height=320)
 
-            st.markdown("**Sugestões automáticas de novas regras (com base nas correções confirmadas)**")
+            st.markdown("**Sugestões automáticas de novas regras**")
             sug = build_learning_suggestions(st.session_state.div_master)
 
             if sug.empty:
-                st.info("Ainda não há sugestões automáticas suficientes. Confirme e ajuste alguns itens para o motor começar a aprender.")
+                st.info("Ainda não há sugestões automáticas suficientes. Confirme e ajuste alguns itens para o motor aprender.")
             else:
                 st.dataframe(sug.head(20), use_container_width=True, height=280)
 
                 sx1, sx2 = st.columns([2.2, 1.0])
                 with sx1:
-                    sug_idx = st.number_input("Linha da sugestão (pela ordem exibida, começando em 0)", min_value=0, max_value=max(0, len(sug.head(20)) - 1), step=1, value=0)
+                    sug_idx = st.number_input("Linha da sugestão (começando em 0)", min_value=0, max_value=max(0, len(sug.head(20)) - 1), step=1, value=0)
                 with sx2:
                     sug_prio = st.number_input("Prioridade da regra sugerida", min_value=1, value=70, step=1)
 
@@ -1773,7 +1947,7 @@ else:
 
     if busca.strip():
         q = busca.strip().lower()
-        cols_search = ["DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "NUCLEO", "ORIGEM", "SEVERIDADE", "NUCLEO_SUGERIDO"]
+        cols_search = ["DOCUMENTO", "HISTORICO_OPERACAO", "CHAVE_DOC", "NUCLEO", "ORIGEM", "SEVERIDADE"]
         mask = False
         for c in cols_search:
             if c in df.columns:
@@ -1804,7 +1978,7 @@ else:
     # Ações em massa
     # =====================================================
     st.markdown("### Ações em massa")
-    st.markdown('<div class="cm-help">Fluxo: 1) Filtre  2) Selecione  3) Defina ação  4) Clique em Aplicar.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cm-help">Agora também é possível definir o núcleo final em massa.</div>', unsafe_allow_html=True)
 
     ids_filtrados = list(df.index)
     dm0 = st.session_state.div_master.copy()
@@ -1832,7 +2006,7 @@ else:
     scope = st.radio("Aplicar em:", ["Selecionados", "Todos do filtro"], horizontal=True)
     target_ids = list(dm0.index[dm0["SELECIONADO"].fillna(False)]) if scope == "Selecionados" else ids_filtrados
 
-    bA, bB, bC, bD, bE = st.columns([1.0, 1.0, 1.2, 1.8, 1.0], gap="large")
+    bA, bB, bC, bD, bE, bF = st.columns([1.0, 1.0, 1.2, 1.5, 1.8, 1.0], gap="large")
     with bA:
         bulk_confirm = st.selectbox("Confirmado", ["(não alterar)", "Sim", "Não"])
     with bB:
@@ -1840,8 +2014,10 @@ else:
     with bC:
         bulk_status = st.selectbox("Status", ["(não alterar)"] + STATUS_OPTS)
     with bD:
-        bulk_obs = st.text_input("OBS (opcional)", value="")
+        bulk_nucleo = st.selectbox("Núcleo", ["(não alterar)"] + get_nucleos())
     with bE:
+        bulk_obs = st.text_input("OBS (opcional)", value="")
+    with bF:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         do_apply = st.button("Aplicar", type="primary", disabled=(len(target_ids) == 0), use_container_width=True)
 
@@ -1851,11 +2027,16 @@ else:
         if bulk_confirm != "(não alterar)":
             if bulk_confirm == "Sim":
                 dm.loc[target_ids, "CONFIRMADO"] = True
-                if "NUCLEO_SUGERIDO" in dm.columns:
-                    dm.loc[target_ids, "NUCLEO"] = dm.loc[target_ids, "NUCLEO_SUGERIDO"].fillna("Não identificado")
+                need = dm.loc[target_ids, "NUCLEO"].astype(str).str.strip().isin(["", "Não identificado"])
+                idx_need = list(pd.Index(target_ids)[need.values])
+                if len(idx_need) > 0:
+                    dm.loc[idx_need, "NUCLEO"] = dm.loc[idx_need, "NUCLEO_SUGERIDO"].fillna("Não identificado")
             else:
                 dm.loc[target_ids, "CONFIRMADO"] = False
-                dm.loc[target_ids, "NUCLEO"] = "Não identificado"
+
+        if bulk_nucleo != "(não alterar)":
+            dm.loc[target_ids, "NUCLEO"] = bulk_nucleo
+            dm.loc[target_ids, "CONFIRMADO"] = True
 
         if bulk_obs.strip():
             dm.loc[target_ids, "OBS_USUARIO"] = bulk_obs.strip()
@@ -1878,10 +2059,10 @@ else:
         st.rerun()
 
     # =====================================================
-    # Tratativa limpa
+    # Tratativa
     # =====================================================
     st.markdown("### Tratativa (tabela)")
-    st.markdown('<div class="cm-help">Aqui fica a camada operacional. As colunas técnicas foram removidas da grade principal.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cm-help">Mantido o histórico para contexto. A coluna operacional final é NÚCLEO.</div>', unsafe_allow_html=True)
 
     view_cols = [
         "SELECIONADO",
@@ -1889,9 +2070,9 @@ else:
         "SEVERIDADE",
         "DATA",
         "DOCUMENTO",
+        "HISTORICO_OPERACAO",
         "CHAVE_DOC",
         "VALOR",
-        "NUCLEO_SUGERIDO",
         "CONFIRMADO",
         "NUCLEO",
         "STATUS",
@@ -1908,11 +2089,11 @@ else:
         "SEVERIDADE": st.column_config.TextColumn(disabled=True),
         "DATA": st.column_config.TextColumn(disabled=True),
         "DOCUMENTO": st.column_config.TextColumn(disabled=True),
+        "HISTORICO_OPERACAO": st.column_config.TextColumn(disabled=True, width="large"),
         "CHAVE_DOC": st.column_config.TextColumn(disabled=True),
         "VALOR": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
-        "NUCLEO_SUGERIDO": st.column_config.TextColumn(disabled=True),
         "CONFIRMADO": st.column_config.CheckboxColumn(),
-        "NUCLEO": st.column_config.SelectboxColumn(options=NUCLEOS),
+        "NUCLEO": st.column_config.SelectboxColumn(options=get_nucleos()),
         "STATUS": st.column_config.SelectboxColumn(options=STATUS_OPTS),
         "RESOLVIDO": st.column_config.CheckboxColumn(),
         "OBS_USUARIO": st.column_config.TextColumn(),
@@ -1929,14 +2110,7 @@ else:
 
     if edited is not None and len(edited) == len(df_view_display):
         to_update = edited.copy()
-
         to_update["NUCLEO"] = to_update["NUCLEO"].fillna("Não identificado").replace("", "Não identificado")
-
-        need = to_update["CONFIRMADO"].fillna(False) & (
-            to_update["NUCLEO"].astype(str).str.strip().eq("") |
-            to_update["NUCLEO"].eq("Não identificado")
-        )
-        to_update.loc[need, "NUCLEO"] = to_update.loc[need, "NUCLEO_SUGERIDO"].fillna("Não identificado")
 
         res_col = to_update["RESOLVIDO"].fillna(False)
         to_update.loc[res_col, "STATUS"] = "Resolvido"
@@ -1945,6 +2119,12 @@ else:
         dm = st.session_state.div_master.copy()
         for c in upd_cols:
             dm.loc[to_update.index, c] = to_update[c].values
+
+        # se confirmou e ainda estiver sem núcleo, leva o sugerido
+        need = dm.loc[to_update.index, "CONFIRMADO"].fillna(False) & dm.loc[to_update.index, "NUCLEO"].astype(str).str.strip().isin(["", "Não identificado"])
+        idx_need = list(pd.Index(to_update.index)[need.values])
+        if len(idx_need) > 0:
+            dm.loc[idx_need, "NUCLEO"] = dm.loc[idx_need, "NUCLEO_SUGERIDO"].fillna("Não identificado")
 
         save_learning_examples(dm.loc[to_update.index].copy())
         st.session_state.div_master = dm
@@ -1984,6 +2164,7 @@ else:
   <div class="row"><span class="label">Documento:</span> <span class="val">{r.get('DOCUMENTO','')}</span></div>
   <div class="row"><span class="label">Chave:</span> <span class="val">{r.get('CHAVE_DOC','')}</span></div>
   <div class="row"><span class="label">Valor:</span> <span class="val">{fmt(r.get('VALOR', np.nan))}</span></div>
+  <div class="row"><span class="label">Histórico:</span> <span class="val">{r.get('HISTORICO_OPERACAO','')}</span></div>
   <div class="row"><span class="label">Núcleo sugerido:</span> <span class="val">{r.get('NUCLEO_SUGERIDO','')}</span></div>
   <div class="row"><span class="label">Núcleo final:</span> <span class="val">{r.get('NUCLEO','')}</span></div>
   <div class="row"><span class="label">Confirmado:</span> <span class="val">{confirmado_txt}</span></div>
@@ -1999,7 +2180,6 @@ else:
                 "MOTIVO_BASE": r.get("MOTIVO_BASE", ""),
                 "REGRA_NUCLEO_APLICADA": r.get("REGRA_NUCLEO_APLICADA", ""),
                 "REGRA_SEVERIDADE_APLICADA": r.get("REGRA_SEVERIDADE_APLICADA", ""),
-                "HISTORICO_OPERACAO": r.get("HISTORICO_OPERACAO", ""),
             })
 
         resumo = (
@@ -2010,14 +2190,14 @@ else:
             f"DOCUMENTO: {r.get('DOCUMENTO','')}\n"
             f"CHAVE: {r.get('CHAVE_DOC','')}\n"
             f"VALOR: {fmt(r.get('VALOR', np.nan))}\n"
-            f"NUCLEO_SUGERIDO: {r.get('NUCLEO_SUGERIDO','')}\n"
-            f"CONFIRMADO: {confirmado_txt}\n"
+            f"HISTORICO: {r.get('HISTORICO_OPERACAO','')}\n"
             f"NUCLEO: {r.get('NUCLEO','')}\n"
+            f"CONFIRMADO: {confirmado_txt}\n"
             f"STATUS: {r.get('STATUS','')}\n"
             f"RESOLVIDO: {resolvido_txt}\n"
             f"OBS: {r.get('OBS_USUARIO','')}\n"
         )
-        st.text_area("Copiar resumo (e-mail/ticket)", value=resumo, height=210)
+        st.text_area("Copiar resumo (e-mail/ticket)", value=resumo, height=230)
 
     # =====================================================
     # Export
@@ -2025,7 +2205,19 @@ else:
     st.markdown("### Exportar")
     filtros = {"origem": origem, "ver": ver, "severidade": sev, "busca": busca.strip(), "_total_aberto": valor_aberto}
 
-    export_cols = ["ORIGEM", "DATA", "DOCUMENTO", "CHAVE_DOC", "VALOR", "NUCLEO_SUGERIDO", "CONFIRMADO", "NUCLEO", "STATUS", "RESOLVIDO", "OBS_USUARIO"]
+    export_cols = [
+        "ORIGEM",
+        "DATA",
+        "DOCUMENTO",
+        "HISTORICO_OPERACAO",
+        "CHAVE_DOC",
+        "VALOR",
+        "CONFIRMADO",
+        "NUCLEO",
+        "STATUS",
+        "RESOLVIDO",
+        "OBS_USUARIO"
+    ]
     df_export = df[export_cols].copy()
 
     excel_bytes = to_excel_divergencias_filtradas(df_filtrado=df_export, filtros=filtros, stats=stats, generated_at=generated_at)
