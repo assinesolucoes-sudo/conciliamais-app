@@ -1592,26 +1592,153 @@ def render_cruzamento_inteligente_v2():
         return df_base.drop_duplicates(subset=[key_col_name], keep="first").copy()
 
     def _to_excel_package(
-        df_result,
-        resumo_dict,
-        dup_a_df=None,
-        dup_b_df=None,
-        base_a_sem_dup=None,
-        base_b_sem_dup=None,
-    ):
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            wb = writer.book
+    df_result,
+    resumo_dict,
+    dup_a_df=None,
+    dup_b_df=None,
+    base_a_sem_dup=None,
+    base_b_sem_dup=None,
+):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        wb = writer.book
 
-            fmt_hdr = wb.add_format({
-                "bold": True, "bg_color": "#DBEAFE", "border": 1,
-                "align": "center", "valign": "vcenter"
-            })
-            fmt_label = wb.add_format({
-                "bold": True, "border": 1, "bg_color": "#F1F5F9"
-            })
-            fmt_value = wb.add_format({"border": 1})
-            fmt_title = wb.add_format({"bold": True, "font_size": 14})
+        fmt_hdr = wb.add_format({
+            "bold": True, "bg_color": "#DBEAFE", "border": 1,
+            "align": "center", "valign": "vcenter"
+        })
+        fmt_label = wb.add_format({
+            "bold": True, "border": 1, "bg_color": "#F1F5F9"
+        })
+        fmt_value = wb.add_format({"border": 1})
+        fmt_text = wb.add_format({"border": 1, "num_format": "@"})
+        fmt_num = wb.add_format({"border": 1, "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'})
+
+        def _prepare_original_df(df):
+            if df is None or df.empty:
+                return pd.DataFrame()
+            out = df.copy()
+            # remove colunas técnicas da exportação saneada
+            out = out.drop(columns=["__KEY__"], errors="ignore")
+            return out
+
+        def _write_df_as_text(ws, df):
+            if df is None or df.empty:
+                return
+
+            for c, col in enumerate(df.columns):
+                ws.write(0, c, col, fmt_hdr)
+
+            for r in range(len(df)):
+                for c, col in enumerate(df.columns):
+                    val = df.iloc[r, c]
+                    txt = "" if pd.isna(val) else str(val)
+                    ws.write_string(r + 1, c, txt, fmt_text)
+
+            for c, col in enumerate(df.columns):
+                sample = [str(col)] + df[col].astype(str).head(200).tolist()
+                width = min(max(max(len(x) for x in sample) + 2, 12), 42)
+                ws.set_column(c, c, width)
+
+        def _write_df_mixed(ws, df):
+            if df is None or df.empty:
+                return
+
+            for c, col in enumerate(df.columns):
+                ws.write(0, c, col, fmt_hdr)
+
+            for r in range(len(df)):
+                for c, col in enumerate(df.columns):
+                    val = df.iloc[r, c]
+                    if pd.isna(val):
+                        ws.write(r + 1, c, "", fmt_text)
+                    elif isinstance(val, (int, float, np.integer, np.floating)) and ("VALOR" in str(col).upper() or "DIFEREN" in str(col).upper()):
+                        ws.write_number(r + 1, c, float(val), fmt_num)
+                    else:
+                        ws.write_string(r + 1, c, str(val), fmt_text)
+
+            for c, col in enumerate(df.columns):
+                sample = [str(col)] + df[col].astype(str).head(200).tolist()
+                width = min(max(max(len(x) for x in sample) + 2, 12), 42)
+                ws.set_column(c, c, width)
+
+        # -----------------------------
+        # RESUMO EXECUTIVO
+        # -----------------------------
+        resumo_df = pd.DataFrame([
+            ["Objetivo", resumo_dict.get("objetivo", "")],
+            ["Direção", resumo_dict.get("direcao", "")],
+            ["Total analisado", resumo_dict.get("total", 0)],
+            ["Encontrados", resumo_dict.get("encontrados", 0)],
+            ["Não encontrados", resumo_dict.get("nao_encontrados", 0)],
+            ["Duplicidades na Base A", resumo_dict.get("dup_a", 0)],
+            ["Duplicidades na Base B", resumo_dict.get("dup_b", 0)],
+            ["Divergências", resumo_dict.get("divergentes", 0)],
+            ["Aderência (%)", resumo_dict.get("aderencia", 0.0)],
+            ["Base A sem duplicados", resumo_dict.get("base_a_sem_dup_qtd", 0)],
+            ["Base B sem duplicados", resumo_dict.get("base_b_sem_dup_qtd", 0)],
+        ], columns=["Indicador", "Valor"])
+
+        resumo_df.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False)
+        wsr = writer.sheets["RESUMO_EXECUTIVO"]
+        wsr.write(0, 0, "Indicador", fmt_hdr)
+        wsr.write(0, 1, "Valor", fmt_hdr)
+        wsr.set_column(0, 0, 30)
+        wsr.set_column(1, 1, 20)
+
+        for r in range(1, len(resumo_df) + 1):
+            wsr.write(r, 0, resumo_df.iloc[r - 1, 0], fmt_label)
+            wsr.write(r, 1, resumo_df.iloc[r - 1, 1], fmt_value)
+
+        # -----------------------------
+        # NÃO ENCONTRADOS
+        # -----------------------------
+        df_nao = df_result[df_result["RESULTADO_FINAL"] == "Sem correspondência"].copy()
+        df_nao.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
+        ws_nao = writer.sheets["NAO_ENCONTRADOS"]
+        _write_df_mixed(ws_nao, df_nao)
+
+        # -----------------------------
+        # DUPLICIDADES
+        # -----------------------------
+        dup_a_exp = _prepare_original_df(dup_a_df)
+        dup_b_exp = _prepare_original_df(dup_b_df)
+
+        if not dup_a_exp.empty:
+            dup_a_exp.to_excel(writer, sheet_name="DUP_BASE_A", index=False)
+            ws_dup_a = writer.sheets["DUP_BASE_A"]
+            _write_df_as_text(ws_dup_a, dup_a_exp)
+
+        if not dup_b_exp.empty:
+            dup_b_exp.to_excel(writer, sheet_name="DUP_BASE_B", index=False)
+            ws_dup_b = writer.sheets["DUP_BASE_B"]
+            _write_df_as_text(ws_dup_b, dup_b_exp)
+
+        # -----------------------------
+        # BASES SEM DUPLICADOS
+        # -----------------------------
+        base_a_sem_dup_exp = _prepare_original_df(base_a_sem_dup)
+        base_b_sem_dup_exp = _prepare_original_df(base_b_sem_dup)
+
+        if not base_a_sem_dup_exp.empty:
+            base_a_sem_dup_exp.to_excel(writer, sheet_name="BASE_A_SEM_DUPLICADOS", index=False)
+            ws_a_clean = writer.sheets["BASE_A_SEM_DUPLICADOS"]
+            _write_df_as_text(ws_a_clean, base_a_sem_dup_exp)
+
+        if not base_b_sem_dup_exp.empty:
+            base_b_sem_dup_exp.to_excel(writer, sheet_name="BASE_B_SEM_DUPLICADOS", index=False)
+            ws_b_clean = writer.sheets["BASE_B_SEM_DUPLICADOS"]
+            _write_df_as_text(ws_b_clean, base_b_sem_dup_exp)
+
+        # -----------------------------
+        # RESULTADO COMPLETO
+        # -----------------------------
+        df_result.to_excel(writer, sheet_name="RESULTADO_COMPLETO", index=False)
+        ws_res = writer.sheets["RESULTADO_COMPLETO"]
+        _write_df_mixed(ws_res, df_result)
+
+    output.seek(0)
+    return output
 
             # Resumo executivo
             resumo_df = pd.DataFrame([
