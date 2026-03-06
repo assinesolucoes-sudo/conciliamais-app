@@ -1536,7 +1536,270 @@ with st.sidebar:
 
 if mod == "ProCV" and area == "Cruzamento Inteligente":
     st.title("Cruzamento Inteligente")
-    st.write("Aqui será o módulo de confronto entre duas bases.")
+    st.caption("Cruze duas bases, defina a chave de relacionamento e identifique diferenças automaticamente.")
+
+    def _norm_text(x):
+        if pd.isna(x):
+            return ""
+        s = str(x).strip().lower()
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    def _build_key(df_base, cols):
+        if not cols:
+            return pd.Series([""] * len(df_base), index=df_base.index)
+        key = df_base[cols[0]].astype(str).fillna("").map(_norm_text)
+        for c in cols[1:]:
+            key = key + "||" + df_base[c].astype(str).fillna("").map(_norm_text)
+        return key
+
+    def _suggest_columns(cols_a, cols_b):
+        sug = []
+        for a in cols_a:
+            na = _norm_text(a)
+            for b in cols_b:
+                nb = _norm_text(b)
+                score = 0
+                if na == nb:
+                    score += 100
+                if na in nb or nb in na:
+                    score += 40
+                toks_a = set(na.split())
+                toks_b = set(nb.split())
+                score += len(toks_a.intersection(toks_b)) * 10
+                if score > 0:
+                    sug.append((a, b, score))
+        sug = sorted(sug, key=lambda x: x[2], reverse=True)
+        return sug
+
+    st.markdown("### 1) Upload das bases")
+    c1, c2 = st.columns(2)
+
+    with c1:
+        base_a_file = st.file_uploader(
+            "Upload da Base A (.xlsx ou .csv)",
+            type=["xlsx", "csv"],
+            key="procv_base_a"
+        )
+
+    with c2:
+        base_b_file = st.file_uploader(
+            "Upload da Base B (.xlsx ou .csv)",
+            type=["xlsx", "csv"],
+            key="procv_base_b"
+        )
+
+    if not base_a_file or not base_b_file:
+        st.info("Faça o upload das duas bases para iniciar o cruzamento.")
+        st.stop()
+
+    try:
+        df_a = read_table(base_a_file)
+        df_b = read_table(base_b_file)
+    except Exception as e:
+        st.error(f"Erro ao ler os arquivos: {e}")
+        st.stop()
+
+    st.markdown("### 2) Visão inicial das bases")
+    v1, v2 = st.columns(2)
+
+    with v1:
+        st.markdown("**Base A**")
+        st.caption(f"{len(df_a):,} linhas | {len(df_a.columns)} colunas")
+        st.dataframe(df_a.head(10), use_container_width=True, height=260)
+
+    with v2:
+        st.markdown("**Base B**")
+        st.caption(f"{len(df_b):,} linhas | {len(df_b.columns)} colunas")
+        st.dataframe(df_b.head(10), use_container_width=True, height=260)
+
+    suggestions = _suggest_columns(list(df_a.columns), list(df_b.columns))
+
+    st.markdown("### 3) Configuração do cruzamento")
+    if suggestions:
+        top_sug = pd.DataFrame(suggestions[:12], columns=["COLUNA_A", "COLUNA_B", "SCORE"])
+        st.markdown("**Sugestões automáticas de colunas parecidas**")
+        st.dataframe(top_sug, use_container_width=True, height=220)
+
+    k1, k2 = st.columns(2)
+
+    default_a = [suggestions[0][0]] if suggestions else []
+    default_b = [suggestions[0][1]] if suggestions else []
+
+    with k1:
+        key_a = st.multiselect(
+            "Campo(s) chave da Base A",
+            options=list(df_a.columns),
+            default=default_a
+        )
+
+    with k2:
+        key_b = st.multiselect(
+            "Campo(s) chave da Base B",
+            options=list(df_b.columns),
+            default=default_b
+        )
+
+    if len(key_a) != len(key_b):
+        st.warning("A quantidade de campos-chave da Base A e da Base B deve ser igual.")
+        st.stop()
+
+    r1, r2 = st.columns(2)
+
+    with r1:
+        retorno_cols_b = st.multiselect(
+            "Campos da Base B para retornar",
+            options=list(df_b.columns)
+        )
+
+    with r2:
+        comparar_valores = st.checkbox("Comparar um campo numérico entre as bases", value=False)
+
+    col_val_a = None
+    col_val_b = None
+
+    if comparar_valores:
+        cva, cvb = st.columns(2)
+        with cva:
+            col_val_a = st.selectbox("Campo numérico da Base A", list(df_a.columns), key="procv_val_a")
+        with cvb:
+            col_val_b = st.selectbox("Campo numérico da Base B", list(df_b.columns), key="procv_val_b")
+
+    processar = st.button("Processar cruzamento", type="primary", use_container_width=True)
+
+    if not processar:
+        st.stop()
+
+    if not key_a or not key_b:
+        st.warning("Selecione pelo menos uma chave de relacionamento.")
+        st.stop()
+
+    with st.spinner("Processando cruzamento..."):
+        base_a = df_a.copy()
+        base_b = df_b.copy()
+
+        base_a["__KEY__"] = _build_key(base_a, key_a)
+        base_b["__KEY__"] = _build_key(base_b, key_b)
+
+        dup_b = base_b["__KEY__"].value_counts()
+        dup_keys_b = set(dup_b[dup_b > 1].index.tolist())
+
+        b_lookup = base_b.drop_duplicates(subset="__KEY__", keep="first").set_index("__KEY__", drop=False)
+
+        out_rows = []
+
+        for _, row_a in base_a.iterrows():
+            key_val = row_a["__KEY__"]
+            row_out = {}
+
+            for c in key_a:
+                row_out[f"CHAVE_A_{c}"] = row_a.get(c, "")
+
+            row_out["STATUS_MATCH"] = "Não encontrado"
+            row_out["CHAVE_PROCESSADA"] = key_val
+
+            if key_val in dup_keys_b:
+                row_out["STATUS_MATCH"] = "Duplicidade na Base B"
+                row_out["RESULTADO_FINAL"] = "Duplicidade"
+            elif key_val in b_lookup.index:
+                row_b = b_lookup.loc[key_val]
+                row_out["STATUS_MATCH"] = "Encontrado"
+
+                for c in retorno_cols_b:
+                    row_out[f"RETORNO_B_{c}"] = row_b.get(c, "")
+
+                if comparar_valores and col_val_a and col_val_b:
+                    val_a = normalize_money(row_a.get(col_val_a, np.nan))
+                    val_b = normalize_money(row_b.get(col_val_b, np.nan))
+
+                    row_out[f"VALOR_A_{col_val_a}"] = val_a
+                    row_out[f"VALOR_B_{col_val_b}"] = val_b
+
+                    if pd.notna(val_a) and pd.notna(val_b):
+                        diff = round(float(val_a) - float(val_b), 2)
+                        row_out["DIFERENCA"] = diff
+                        row_out["RESULTADO_FINAL"] = "Match exato" if abs(diff) <= 0.01 else "Match com divergência"
+                    else:
+                        row_out["DIFERENCA"] = np.nan
+                        row_out["RESULTADO_FINAL"] = "Match encontrado"
+                else:
+                    row_out["RESULTADO_FINAL"] = "Match encontrado"
+            else:
+                for c in retorno_cols_b:
+                    row_out[f"RETORNO_B_{c}"] = ""
+                if comparar_valores and col_val_a:
+                    row_out[f"VALOR_A_{col_val_a}"] = normalize_money(row_a.get(col_val_a, np.nan))
+                if comparar_valores and col_val_b:
+                    row_out[f"VALOR_B_{col_val_b}"] = np.nan
+                    row_out["DIFERENCA"] = np.nan
+                row_out["RESULTADO_FINAL"] = "Sem correspondência"
+
+            out_rows.append(row_out)
+
+        df_result = pd.DataFrame(out_rows)
+
+    st.markdown("### 4) Resumo do processamento")
+    total = len(df_result)
+    encontrados = int((df_result["STATUS_MATCH"] == "Encontrado").sum()) if total else 0
+    nao_encontrados = int((df_result["STATUS_MATCH"] == "Não encontrado").sum()) if total else 0
+    duplicados = int((df_result["STATUS_MATCH"] == "Duplicidade na Base B").sum()) if total else 0
+    divergentes = int((df_result["RESULTADO_FINAL"] == "Match com divergência").sum()) if total and "RESULTADO_FINAL" in df_result.columns else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Linhas processadas", total)
+    with m2:
+        st.metric("Encontrados", encontrados)
+    with m3:
+        st.metric("Não encontrados", nao_encontrados)
+    with m4:
+        st.metric("Divergentes", divergentes)
+
+    if duplicados > 0:
+        st.warning(f"Foram encontradas {duplicados} chave(s) duplicadas na Base B.")
+
+    st.markdown("### 5) Resultado")
+    f1, f2 = st.columns([1.2, 2.0])
+
+    with f1:
+        filtro_resultado = st.selectbox(
+            "Filtrar resultado",
+            ["Todos", "Match exato", "Match com divergência", "Sem correspondência", "Match encontrado", "Duplicidade"]
+        )
+
+    with f2:
+        busca_procv = st.text_input("Buscar no resultado", value="")
+
+    df_show = df_result.copy()
+
+    if filtro_resultado != "Todos":
+        if filtro_resultado == "Duplicidade":
+            df_show = df_show[df_show["RESULTADO_FINAL"] == "Duplicidade"].copy()
+        else:
+            df_show = df_show[df_show["RESULTADO_FINAL"] == filtro_resultado].copy()
+
+    if busca_procv.strip():
+        q = busca_procv.strip().lower()
+        mask = pd.Series(False, index=df_show.index)
+        for c in df_show.columns:
+            mask = mask | df_show[c].astype(str).str.lower().str.contains(q, na=False)
+        df_show = df_show[mask].copy()
+
+    st.dataframe(df_show, use_container_width=True, height=520)
+
+    excel_out = BytesIO()
+    with pd.ExcelWriter(excel_out, engine="xlsxwriter") as writer:
+        df_show.to_excel(writer, sheet_name="Cruzamento", index=False)
+    excel_out.seek(0)
+
+    st.download_button(
+        "Baixar resultado em Excel",
+        data=excel_out,
+        file_name=f"Cruzamento_Inteligente_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+
     st.stop()
 
 elif mod != "Financeiro" or area != "Extrato Bancário":
