@@ -1586,12 +1586,12 @@ def render_cruzamento_inteligente_v2():
         dup_df = dup_df.sort_values([key_col_name])
         return dup_df
 
-    def _dedupe_keep_first(df_base, key_col_name="__KEY__"):
+       def _dedupe_keep_first(df_base, key_col_name="__KEY__"):
         if key_col_name not in df_base.columns:
             return df_base.copy()
         return df_base.drop_duplicates(subset=[key_col_name], keep="first").copy()
 
-     def _to_excel_package(
+    def _to_excel_package(
         df_result,
         resumo_dict,
         dup_a_df=None,
@@ -1604,15 +1604,23 @@ def render_cruzamento_inteligente_v2():
             wb = writer.book
 
             fmt_hdr = wb.add_format({
-                "bold": True, "bg_color": "#DBEAFE", "border": 1,
-                "align": "center", "valign": "vcenter"
+                "bold": True,
+                "bg_color": "#DBEAFE",
+                "border": 1,
+                "align": "center",
+                "valign": "vcenter"
             })
             fmt_label = wb.add_format({
-                "bold": True, "border": 1, "bg_color": "#F1F5F9"
+                "bold": True,
+                "border": 1,
+                "bg_color": "#F1F5F9"
             })
             fmt_value = wb.add_format({"border": 1})
             fmt_text = wb.add_format({"border": 1, "num_format": "@"})
-            fmt_num = wb.add_format({"border": 1, "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'})
+            fmt_num = wb.add_format({
+                "border": 1,
+                "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'
+            })
 
             def _prepare_original_df(df):
                 if df is None or df.empty:
@@ -1651,7 +1659,9 @@ def render_cruzamento_inteligente_v2():
                         val = df.iloc[r, c]
                         if pd.isna(val):
                             ws.write(r + 1, c, "", fmt_text)
-                        elif isinstance(val, (int, float, np.integer, np.floating)) and ("VALOR" in str(col).upper() or "DIFEREN" in str(col).upper()):
+                        elif isinstance(val, (int, float, np.integer, np.floating)) and (
+                            "VALOR" in str(col).upper() or "DIFEREN" in str(col).upper()
+                        ):
                             ws.write_number(r + 1, c, float(val), fmt_num)
                         else:
                             ws.write_string(r + 1, c, str(val), fmt_text)
