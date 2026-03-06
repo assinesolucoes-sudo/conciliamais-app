@@ -1519,12 +1519,17 @@ with st.sidebar:
     mod = st.radio("Módulo", ["Financeiro", "ProCV"], index=0)
     if mod == "Financeiro":
         area = st.radio("Área", ["Extrato Bancário", "Posição a Pagar", "Posição a Receber"], index=0)
-    else:
-        area = st.radio("Área", ["Em construção"], index=0)
+   else:
+    area = st.radio("Área", ["Cruzamento Inteligente"], index=0)
     st.markdown("---")
     st.caption(f"Você está em: {mod} > {area}")
 
-if mod != "Financeiro" or area != "Extrato Bancário":
+if mod == "ProCV" and area == "Cruzamento Inteligente":
+    st.title("Cruzamento Inteligente")
+    st.write("Aqui será o módulo de confronto entre duas bases.")
+    st.stop()
+
+elif mod != "Financeiro" or area != "Extrato Bancário":
     st.title("ConciliaMais")
     st.info("Esta área ainda está em construção. Por enquanto, use Financeiro > Extrato Bancário.")
     st.stop()
