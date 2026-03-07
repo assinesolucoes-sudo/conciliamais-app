@@ -8,6 +8,7 @@ import unicodedata
 import hashlib
 from io import BytesIO
 from datetime import datetime
+from openpyxl import load_workbook
 
 # PDF (Relatório Resumo)
 from reportlab.lib.pagesizes import A4
@@ -650,14 +651,35 @@ def extract_doc_key(text):
 
 def read_table(uploaded):
     name = uploaded.name.lower()
+
+    # CSV
     if name.endswith(".csv"):
-        return pd.read_csv(uploaded, sep=None, engine="python")
+        uploaded.seek(0)
+        try:
+            return pd.read_csv(
+                uploaded,
+                sep=None,
+                engine="python",
+                dtype=str,
+                keep_default_na=False
+            ).fillna("")
+        except:
+            uploaded.seek(0)
+            return pd.read_csv(
+                uploaded,
+                dtype=str,
+                keep_default_na=False
+            ).fillna("")
+
+    # EXCEL
     xl = pd.ExcelFile(uploaded)
     best = None
+
     for sh in xl.sheet_names:
-        tmp = xl.parse(sh)
+        tmp = xl.parse(sh, dtype=str).fillna("")
         if best is None or tmp.shape[1] > best.shape[1]:
             best = tmp
+
     return best
 
 def auto_detect_financial(df):
@@ -1515,7 +1537,7 @@ load_learning()
 # =========================================================
 def render_cruzamento_inteligente_v2():
     st.title("Cruzamento Inteligente")
-    st.caption("Valide, compare e relacione duas bases com apoio guiado.")
+    st.caption("Valide, compare e relacione duas bases com preservação de estrutura dos campos.")
 
     def _norm_text(x):
         if pd.isna(x):
@@ -1523,6 +1545,9 @@ def render_cruzamento_inteligente_v2():
         s = str(x).strip()
         s = re.sub(r"\s+", " ", s)
         return s
+
+    def _force_text_series(sr):
+        return sr.fillna("").map(lambda x: "" if pd.isna(x) else str(x))
 
     def _build_key(df_base, cols, rules_map=None, ignore_case=True):
         if not cols:
@@ -1535,11 +1560,19 @@ def render_cruzamento_inteligente_v2():
             as_text = rule.get("as_text", True)
             pad_size = rule.get("pad_size", None)
             ignore_spaces = rule.get("ignore_spaces", True)
+            trim = rule.get("trim", True)
+            keep_only_digits = rule.get("keep_only_digits", False)
 
             s = "" if pd.isna(val) else str(val)
 
+            if trim:
+                s = s.strip()
+
             if ignore_spaces:
-                s = re.sub(r"\s+", " ", s).strip()
+                s = re.sub(r"\s+", " ", s)
+
+            if keep_only_digits:
+                s = re.sub(r"\D", "", s)
 
             if as_text:
                 s = str(s)
@@ -1591,6 +1624,60 @@ def render_cruzamento_inteligente_v2():
             return df_base.copy()
         return df_base.drop_duplicates(subset=[key_col_name], keep="first").copy()
 
+    def _write_df_excel(ws, df, wb, text_priority_cols=None):
+        if df is None or df.empty:
+            return
+
+        text_priority_cols = set(text_priority_cols or [])
+
+        fmt_hdr = wb.add_format({
+            "bold": True,
+            "bg_color": "#DBEAFE",
+            "border": 1,
+            "align": "center",
+            "valign": "vcenter"
+        })
+        fmt_text = wb.add_format({"border": 1, "num_format": "@"})
+        fmt_num = wb.add_format({"border": 1, "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'})
+
+        for c, col in enumerate(df.columns):
+            ws.write(0, c, col, fmt_hdr)
+
+        for r in range(len(df)):
+            for c, col in enumerate(df.columns):
+                val = df.iloc[r, c]
+
+                if pd.isna(val):
+                    ws.write_string(r + 1, c, "", fmt_text)
+                    continue
+
+                col_up = str(col).upper()
+                must_be_text = (
+                    col in text_priority_cols
+                    or "CHAVE" in col_up
+                    or "COD" in col_up
+                    or "CÓD" in col_up
+                    or "LOJA" in col_up
+                    or "DOCUMENTO" in col_up
+                    or "PREFIXO" in col_up
+                    or "TITULO" in col_up
+                    or "TÍTULO" in col_up
+                )
+
+                if must_be_text:
+                    ws.write_string(r + 1, c, str(val), fmt_text)
+                elif isinstance(val, (int, float, np.integer, np.floating)) and (
+                    "VALOR" in col_up or "DIFEREN" in col_up
+                ):
+                    ws.write_number(r + 1, c, float(val), fmt_num)
+                else:
+                    ws.write_string(r + 1, c, str(val), fmt_text)
+
+        for c, col in enumerate(df.columns):
+            sample = [str(col)] + df[col].astype(str).head(200).tolist()
+            width = min(max(max(len(x) for x in sample) + 2, 12), 48)
+            ws.set_column(c, c, width)
+
     def _to_excel_package(
         df_result,
         resumo_dict,
@@ -1598,6 +1685,8 @@ def render_cruzamento_inteligente_v2():
         dup_b_df=None,
         base_a_sem_dup=None,
         base_b_sem_dup=None,
+        text_priority_cols_a=None,
+        text_priority_cols_b=None,
     ):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -1610,66 +1699,8 @@ def render_cruzamento_inteligente_v2():
                 "align": "center",
                 "valign": "vcenter"
             })
-            fmt_label = wb.add_format({
-                "bold": True,
-                "border": 1,
-                "bg_color": "#F1F5F9"
-            })
+            fmt_label = wb.add_format({"bold": True, "border": 1, "bg_color": "#F1F5F9"})
             fmt_value = wb.add_format({"border": 1})
-            fmt_text = wb.add_format({"border": 1, "num_format": "@"})
-            fmt_num = wb.add_format({
-                "border": 1,
-                "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'
-            })
-
-            def _prepare_original_df(df):
-                if df is None or df.empty:
-                    return pd.DataFrame()
-                out = df.copy()
-                out = out.drop(columns=["__KEY__"], errors="ignore")
-                return out
-
-            def _write_df_as_text(ws, df):
-                if df is None or df.empty:
-                    return
-
-                for c, col in enumerate(df.columns):
-                    ws.write(0, c, col, fmt_hdr)
-
-                for r in range(len(df)):
-                    for c, col in enumerate(df.columns):
-                        val = df.iloc[r, c]
-                        txt = "" if pd.isna(val) else str(val)
-                        ws.write_string(r + 1, c, txt, fmt_text)
-
-                for c, col in enumerate(df.columns):
-                    sample = [str(col)] + df[col].astype(str).head(200).tolist()
-                    width = min(max(max(len(x) for x in sample) + 2, 12), 42)
-                    ws.set_column(c, c, width)
-
-            def _write_df_mixed(ws, df):
-                if df is None or df.empty:
-                    return
-
-                for c, col in enumerate(df.columns):
-                    ws.write(0, c, col, fmt_hdr)
-
-                for r in range(len(df)):
-                    for c, col in enumerate(df.columns):
-                        val = df.iloc[r, c]
-                        if pd.isna(val):
-                            ws.write(r + 1, c, "", fmt_text)
-                        elif isinstance(val, (int, float, np.integer, np.floating)) and (
-                            "VALOR" in str(col).upper() or "DIFEREN" in str(col).upper()
-                        ):
-                            ws.write_number(r + 1, c, float(val), fmt_num)
-                        else:
-                            ws.write_string(r + 1, c, str(val), fmt_text)
-
-                for c, col in enumerate(df.columns):
-                    sample = [str(col)] + df[col].astype(str).head(200).tolist()
-                    width = min(max(max(len(x) for x in sample) + 2, 12), 42)
-                    ws.set_column(c, c, width)
 
             resumo_df = pd.DataFrame([
                 ["Objetivo", resumo_dict.get("objetivo", "")],
@@ -1697,44 +1728,43 @@ def render_cruzamento_inteligente_v2():
                 wsr.write(r, 1, resumo_df.iloc[r - 1, 1], fmt_value)
 
             df_nao = df_result[df_result["RESULTADO_FINAL"] == "Sem correspondência"].copy()
-            df_nao.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
-            ws_nao = writer.sheets["NAO_ENCONTRADOS"]
-            _write_df_mixed(ws_nao, df_nao)
 
-            dup_a_exp = _prepare_original_df(dup_a_df)
-            dup_b_exp = _prepare_original_df(dup_b_df)
+            ws_nao = wb.add_worksheet("NAO_ENCONTRADOS")
+            writer.sheets["NAO_ENCONTRADOS"] = ws_nao
+            _write_df_excel(ws_nao, df_nao, wb, text_priority_cols=(text_priority_cols_a or []) + (text_priority_cols_b or []))
 
-            if not dup_a_exp.empty:
-                dup_a_exp.to_excel(writer, sheet_name="DUP_BASE_A", index=False)
-                ws_dup_a = writer.sheets["DUP_BASE_A"]
-                _write_df_as_text(ws_dup_a, dup_a_exp)
+            if dup_a_df is not None and not dup_a_df.empty:
+                dup_a_exp = dup_a_df.drop(columns=["__KEY__"], errors="ignore").copy()
+                ws_dup_a = wb.add_worksheet("DUP_BASE_A")
+                writer.sheets["DUP_BASE_A"] = ws_dup_a
+                _write_df_excel(ws_dup_a, dup_a_exp, wb, text_priority_cols=text_priority_cols_a or [])
 
-            if not dup_b_exp.empty:
-                dup_b_exp.to_excel(writer, sheet_name="DUP_BASE_B", index=False)
-                ws_dup_b = writer.sheets["DUP_BASE_B"]
-                _write_df_as_text(ws_dup_b, dup_b_exp)
+            if dup_b_df is not None and not dup_b_df.empty:
+                dup_b_exp = dup_b_df.drop(columns=["__KEY__"], errors="ignore").copy()
+                ws_dup_b = wb.add_worksheet("DUP_BASE_B")
+                writer.sheets["DUP_BASE_B"] = ws_dup_b
+                _write_df_excel(ws_dup_b, dup_b_exp, wb, text_priority_cols=text_priority_cols_b or [])
 
-            base_a_sem_dup_exp = _prepare_original_df(base_a_sem_dup)
-            base_b_sem_dup_exp = _prepare_original_df(base_b_sem_dup)
+            if base_a_sem_dup is not None and not base_a_sem_dup.empty:
+                base_a_exp = base_a_sem_dup.drop(columns=["__KEY__"], errors="ignore").copy()
+                ws_a = wb.add_worksheet("BASE_A_SEM_DUPLICADOS")
+                writer.sheets["BASE_A_SEM_DUPLICADOS"] = ws_a
+                _write_df_excel(ws_a, base_a_exp, wb, text_priority_cols=text_priority_cols_a or [])
 
-            if not base_a_sem_dup_exp.empty:
-                base_a_sem_dup_exp.to_excel(writer, sheet_name="BASE_A_SEM_DUPLICADOS", index=False)
-                ws_a_clean = writer.sheets["BASE_A_SEM_DUPLICADOS"]
-                _write_df_as_text(ws_a_clean, base_a_sem_dup_exp)
+            if base_b_sem_dup is not None and not base_b_sem_dup.empty:
+                base_b_exp = base_b_sem_dup.drop(columns=["__KEY__"], errors="ignore").copy()
+                ws_b = wb.add_worksheet("BASE_B_SEM_DUPLICADOS")
+                writer.sheets["BASE_B_SEM_DUPLICADOS"] = ws_b
+                _write_df_excel(ws_b, base_b_exp, wb, text_priority_cols=text_priority_cols_b or [])
 
-            if not base_b_sem_dup_exp.empty:
-                base_b_sem_dup_exp.to_excel(writer, sheet_name="BASE_B_SEM_DUPLICADOS", index=False)
-                ws_b_clean = writer.sheets["BASE_B_SEM_DUPLICADOS"]
-                _write_df_as_text(ws_b_clean, base_b_sem_dup_exp)
-
-            df_result.to_excel(writer, sheet_name="RESULTADO_COMPLETO", index=False)
-            ws_res = writer.sheets["RESULTADO_COMPLETO"]
-            _write_df_mixed(ws_res, df_result)
+            ws_full = wb.add_worksheet("RESULTADO_COMPLETO")
+            writer.sheets["RESULTADO_COMPLETO"] = ws_full
+            _write_df_excel(ws_full, df_result, wb, text_priority_cols=(text_priority_cols_a or []) + (text_priority_cols_b or []))
 
         output.seek(0)
         return output
-    # 1) Objetivo
-    st.markdown("### 1) O que você deseja fazer?")
+
+    st.markdown("### 1) O que deseja fazer?")
     objetivo = st.radio(
         "Tipo de análise",
         [
@@ -1746,15 +1776,14 @@ def render_cruzamento_inteligente_v2():
         ]
     )
 
-    # 2) Bases
     st.markdown("### 2) Bases da análise")
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Base A — referência**")
-        base_a_file = st.file_uploader("Upload Base A (.xlsx ou .csv)", type=["xlsx", "csv"], key="ci_v4_a")
+        base_a_file = st.file_uploader("Upload Base A (.xlsx ou .csv)", type=["xlsx", "csv"], key="ci_v5_a")
     with c2:
         st.markdown("**Base B — base a validar / confrontar**")
-        base_b_file = st.file_uploader("Upload Base B (.xlsx ou .csv)", type=["xlsx", "csv"], key="ci_v4_b")
+        base_b_file = st.file_uploader("Upload Base B (.xlsx ou .csv)", type=["xlsx", "csv"], key="ci_v5_b")
 
     if not base_a_file or not base_b_file:
         st.info("Faça o upload das duas bases para continuar.")
@@ -1767,7 +1796,6 @@ def render_cruzamento_inteligente_v2():
         st.error(f"Erro ao ler os arquivos: {e}")
         return
 
-    # 3) Direção
     st.markdown("### 3) Direção da validação")
     direcao = st.radio(
         "Como deseja comparar as bases?",
@@ -1778,7 +1806,6 @@ def render_cruzamento_inteligente_v2():
         ]
     )
 
-    # 4) Visão inicial
     st.markdown("### 4) Visão inicial das bases")
     v1, v2 = st.columns(2)
     with v1:
@@ -1790,7 +1817,6 @@ def render_cruzamento_inteligente_v2():
         st.caption(f"{len(df_b):,} linhas | {len(df_b.columns)} colunas")
         st.dataframe(df_b.head(8), use_container_width=True, height=240)
 
-    # 5) Relacionamento
     st.markdown("### 5) Como os registros se correspondem?")
     suggestions = _suggest_columns(list(df_a.columns), list(df_b.columns))
     if suggestions:
@@ -1805,66 +1831,96 @@ def render_cruzamento_inteligente_v2():
     for i in range(int(qtd_rel)):
         ra, rb = st.columns(2)
         with ra:
-            campo_a = st.selectbox(f"Campo Base A #{i+1}", list(df_a.columns), key=f"v4_rel_a_{i}")
+            campo_a = st.selectbox(f"Campo Base A #{i+1}", list(df_a.columns), key=f"v5_rel_a_{i}")
         with rb:
-            campo_b = st.selectbox(f"Campo Base B #{i+1}", list(df_b.columns), key=f"v4_rel_b_{i}")
+            campo_b = st.selectbox(f"Campo Base B #{i+1}", list(df_b.columns), key=f"v5_rel_b_{i}")
         relacionamento.append((campo_a, campo_b))
 
     key_a = [x[0] for x in relacionamento]
     key_b = [x[1] for x in relacionamento]
 
-    # 6) Regras
-    st.markdown("### 6) Regras de tratamento dos dados")
-    ignore_case = st.checkbox("Ignorar maiúsculas e minúsculas", value=True)
-    ignore_spaces = st.checkbox("Remover espaços extras", value=True)
-    preserve_as_text = st.checkbox("Tratar campos-chave como texto", value=True)
-    aplicar_zeros = st.checkbox("Aplicar zeros à esquerda em campos específicos", value=False)
+    st.markdown("### 6) Regras de tratamento")
+    c_rule1, c_rule2, c_rule3 = st.columns(3)
+    with c_rule1:
+        ignore_case = st.checkbox("Ignorar maiúsculas/minúsculas", value=True)
+    with c_rule2:
+        ignore_spaces = st.checkbox("Remover espaços extras", value=True)
+    with c_rule3:
+        preserve_as_text = st.checkbox("Tratar chaves como texto", value=True)
+
+    aplicar_zeros = st.checkbox("Aplicar zeros à esquerda por campo", value=False)
+    manter_somente_numeros = st.checkbox("Manter apenas números nos campos-chave", value=False)
 
     rules_a = {}
     rules_b = {}
 
-    if aplicar_zeros:
-        for i, (ca, cb) in enumerate(relacionamento):
+    for i, (ca, cb) in enumerate(relacionamento):
+        pad_a = None
+        pad_b = None
+
+        if aplicar_zeros:
             z1, z2 = st.columns(2)
             with z1:
-                pad_a = st.selectbox(
+                pad_a_raw = st.selectbox(
                     f"Tamanho fixo Base A — {ca}",
-                    options=["Sem ajuste", "2", "3", "4", "5", "6"],
+                    options=["Sem ajuste", "2", "3", "4", "5", "6", "8", "10", "12"],
                     index=0,
-                    key=f"v4_pad_a_{i}"
+                    key=f"v5_pad_a_{i}"
                 )
             with z2:
-                pad_b = st.selectbox(
+                pad_b_raw = st.selectbox(
                     f"Tamanho fixo Base B — {cb}",
-                    options=["Sem ajuste", "2", "3", "4", "5", "6"],
+                    options=["Sem ajuste", "2", "3", "4", "5", "6", "8", "10", "12"],
                     index=0,
-                    key=f"v4_pad_b_{i}"
+                    key=f"v5_pad_b_{i}"
                 )
+            pad_a = None if pad_a_raw == "Sem ajuste" else int(pad_a_raw)
+            pad_b = None if pad_b_raw == "Sem ajuste" else int(pad_b_raw)
 
-            rules_a[ca] = {
-                "as_text": preserve_as_text,
-                "pad_size": None if pad_a == "Sem ajuste" else int(pad_a),
-                "ignore_spaces": ignore_spaces,
-            }
-            rules_b[cb] = {
-                "as_text": preserve_as_text,
-                "pad_size": None if pad_b == "Sem ajuste" else int(pad_b),
-                "ignore_spaces": ignore_spaces,
-            }
-    else:
-        for ca, cb in relacionamento:
-            rules_a[ca] = {"as_text": preserve_as_text, "pad_size": None, "ignore_spaces": ignore_spaces}
-            rules_b[cb] = {"as_text": preserve_as_text, "pad_size": None, "ignore_spaces": ignore_spaces}
+        rules_a[ca] = {
+            "as_text": preserve_as_text,
+            "pad_size": pad_a,
+            "ignore_spaces": ignore_spaces,
+            "trim": True,
+            "keep_only_digits": manter_somente_numeros
+        }
+        rules_b[cb] = {
+            "as_text": preserve_as_text,
+            "pad_size": pad_b,
+            "ignore_spaces": ignore_spaces,
+            "trim": True,
+            "keep_only_digits": manter_somente_numeros
+        }
 
-    # 7) Validações adicionais
-    st.markdown("### 7) Validações adicionais (opcional)")
+    st.markdown("### 7) Preservação de estrutura no Excel de saída")
+    st.caption("Selecione aqui os campos que devem sair obrigatoriamente como TEXTO no Excel final.")
+
+    default_text_a = list(dict.fromkeys(key_a))
+    default_text_b = list(dict.fromkeys(key_b))
+
+    p1, p2 = st.columns(2)
+    with p1:
+        text_priority_cols_a = st.multiselect(
+            "Campos da Base A para preservar como texto",
+            options=list(df_a.columns),
+            default=default_text_a,
+            key="v5_text_cols_a"
+        )
+    with p2:
+        text_priority_cols_b = st.multiselect(
+            "Campos da Base B para preservar como texto",
+            options=list(df_b.columns),
+            default=default_text_b,
+            key="v5_text_cols_b"
+        )
+
+    st.markdown("### 8) Validações adicionais")
     validar_dup_a = st.checkbox("Verificar duplicidades na Base A", value=False)
     validar_dup_b = st.checkbox("Verificar duplicidades na Base B", value=False)
     gerar_base_a_sem_dup = st.checkbox("Gerar Base A sem duplicados", value=False)
     gerar_base_b_sem_dup = st.checkbox("Gerar Base B sem duplicados", value=False)
 
-    # 8) Configuração do resultado
-    st.markdown("### 8) Configuração do resultado")
+    st.markdown("### 9) Configuração do resultado")
     retorno_cols = []
     comparar_valores = False
     valor_a = None
@@ -1878,14 +1934,13 @@ def render_cruzamento_inteligente_v2():
         comparar_valores = True
         cva, cvb, cvt = st.columns([1.2, 1.2, 0.8])
         with cva:
-            valor_a = st.selectbox("Campo numérico Base A", list(df_a.columns), key="v4_valor_a")
+            valor_a = st.selectbox("Campo numérico Base A", list(df_a.columns), key="v5_valor_a")
         with cvb:
-            valor_b = st.selectbox("Campo numérico Base B", list(df_b.columns), key="v4_valor_b")
+            valor_b = st.selectbox("Campo numérico Base B", list(df_b.columns), key="v5_valor_b")
         with cvt:
             tolerancia = st.number_input("Tolerância", min_value=0.0, value=0.01, step=0.01)
 
-    # 9) Processar
-    st.markdown("### 9) Processar cruzamento")
+    st.markdown("### 10) Processar cruzamento")
     processar = st.button("Executar análise", type="primary", use_container_width=True)
     if not processar:
         return
@@ -1893,6 +1948,11 @@ def render_cruzamento_inteligente_v2():
     with st.spinner("Processando análise..."):
         base_a = df_a.copy()
         base_b = df_b.copy()
+
+        for c in base_a.columns:
+            base_a[c] = _force_text_series(base_a[c])
+        for c in base_b.columns:
+            base_b[c] = _force_text_series(base_b[c])
 
         base_a["__KEY__"] = _build_key(base_a, key_a, rules_map=rules_a, ignore_case=ignore_case)
         base_b["__KEY__"] = _build_key(base_b, key_b, rules_map=rules_b, ignore_case=ignore_case)
@@ -1976,7 +2036,6 @@ def render_cruzamento_inteligente_v2():
         divergentes = int(df_result["RESULTADO_FINAL"].astype(str).eq("Match com divergência").sum()) if total else 0
         aderencia = ((encontrados / total) * 100.0) if total else 0.0
 
-    # 10) Resultado
     st.markdown("### Resultado da análise")
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
@@ -1986,7 +2045,7 @@ def render_cruzamento_inteligente_v2():
     with m3:
         st.metric("Não encontrados", nao_encontrados)
     with m4:
-        st.metric("Duplicidades no cruzamento", duplicados_result)
+        st.metric("Duplicidades", duplicados_result)
     with m5:
         st.metric("Aderência", f"{aderencia:.1f}%")
 
@@ -2024,12 +2083,14 @@ def render_cruzamento_inteligente_v2():
         dup_b_df=dup_b_df if validar_dup_b else None,
         base_a_sem_dup=base_a_sem_dup if gerar_base_a_sem_dup else None,
         base_b_sem_dup=base_b_sem_dup if gerar_base_b_sem_dup else None,
+        text_priority_cols_a=text_priority_cols_a,
+        text_priority_cols_b=text_priority_cols_b,
     )
 
     st.download_button(
         "Baixar resultado em Excel",
         data=excel_bytes,
-        file_name=f"Cruzamento_Inteligente_V4_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        file_name=f"Cruzamento_Inteligente_V5_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
