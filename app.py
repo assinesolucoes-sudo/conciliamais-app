@@ -1533,7 +1533,7 @@ get_nucleos()
 load_rules()
 load_learning()
 # =========================================================
-# Cruzamento Inteligente V3
+# Match Inteligente V3
 # =========================================================
 def render_cruzamento_inteligente_v2():
     st.title("Match Inteligente")
