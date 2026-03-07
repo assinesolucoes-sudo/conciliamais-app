@@ -2110,14 +2110,14 @@ with st.sidebar:
     else:
         area = st.radio(
             "Área",
-            ["Cruzamento Inteligente"],
+            ["Match Inteligente"],
             index=0
         )
 
     st.markdown("---")
     st.caption(f"Você está em: {mod} > {area}")
 
-if mod == "ProCV" and area == "Cruzamento Inteligente":
+if mod == "ProCV" and area == "Match Inteligente":
     render_cruzamento_inteligente_v2()
     st.stop()
 
