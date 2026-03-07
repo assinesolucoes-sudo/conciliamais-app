@@ -2117,7 +2117,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption(f"Você está em: {mod} > {area}")
 
-if mod == "ProCV" and area == "Match Inteligente":
+if mod == "Match Inteligente" and area == "Match Inteligente":
     render_cruzamento_inteligente_v2()
     st.stop()
 
