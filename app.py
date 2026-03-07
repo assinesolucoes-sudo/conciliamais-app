@@ -1536,7 +1536,7 @@ load_learning()
 # Cruzamento Inteligente V3
 # =========================================================
 def render_cruzamento_inteligente_v2():
-    st.title("Cruzamento Inteligente")
+    st.title("Match Inteligente")
     st.caption("Valide, compare e relacione duas bases com preservação de estrutura dos campos.")
 
     def _norm_text(x):
@@ -2099,7 +2099,7 @@ def render_cruzamento_inteligente_v2():
 # =========================================================
 with st.sidebar:
     st.markdown("## Navegação")
-    mod = st.radio("Módulo", ["Financeiro", "ProCV"], index=0)
+    mod = st.radio("Módulo", ["Financeiro", "Match Inteligente"], index=0)
 
     if mod == "Financeiro":
         area = st.radio(
