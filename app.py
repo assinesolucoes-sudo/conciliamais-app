@@ -1568,13 +1568,13 @@ def render_cruzamento_inteligente_v2():
         s = "" if pd.isna(x) else str(x)
         return re.sub(r"\D", "", s)
 
-    def _apply_transform_value(x, mode, zfill_size=None, prefix=""):
+    def _apply_transform_value(x, mode, chars_n=None, prefix="", zfill_size=None):
         s = "" if pd.isna(x) else str(x).strip()
 
-        if mode == "Sem transformação":
+        if mode == "Sem tratamento":
             return s
 
-        if mode == "Somente dígitos":
+        if mode == "Considerar apenas números":
             return re.sub(r"\D", "", s)
 
         if mode == "Ignorar zeros à esquerda":
@@ -1582,14 +1582,17 @@ def render_cruzamento_inteligente_v2():
             s2 = re.sub(r"^0+", "", s2)
             return s2 if s2 != "" else "0"
 
-        if mode == "Zeros à esquerda":
-            size = int(zfill_size or 0)
-            s2 = re.sub(r"\D", "", s)
-            return s2.zfill(size) if size > 0 and s2 != "" else s2
+        if mode == "Considerar os primeiros caracteres":
+            n = int(chars_n or 0)
+            return s[:n] if n > 0 else s
+
+        if mode == "Considerar os últimos caracteres":
+            n = int(chars_n or 0)
+            return s[-n:] if n > 0 else s
 
         if mode == "Prefixo + zeros à esquerda":
-            size = int(zfill_size or 0)
             pref = str(prefix or "")
+            size = int(zfill_size or 0)
             s2 = re.sub(r"\D", "", s)
             if s2 == "":
                 return ""
@@ -1598,8 +1601,8 @@ def render_cruzamento_inteligente_v2():
 
         return s
 
-    def _apply_transform_series(sr, mode, zfill_size=None, prefix=""):
-        return _force_text_series(sr).map(lambda x: _apply_transform_value(x, mode, zfill_size, prefix))
+    def _apply_transform_series(sr, mode, chars_n=None, prefix="", zfill_size=None):
+        return _force_text_series(sr).map(lambda x: _apply_transform_value(x, mode, chars_n, prefix, zfill_size))
 
     def _build_key(df, cols):
         if not cols:
@@ -1673,7 +1676,7 @@ def render_cruzamento_inteligente_v2():
 
         return (raw_score * 0.45) + (dig_score * 0.55)
 
-    def _suggest_pairs(df_a, df_b, top_n=8):
+    def _suggest_pairs(df_a, df_b, top_n=10):
         rows = []
         for ca in df_a.columns:
             for cb in df_b.columns:
@@ -1682,10 +1685,12 @@ def render_cruzamento_inteligente_v2():
                 score = (nscore * 0.35) + (cscore * 0.65)
                 if score >= 0.18:
                     rows.append({
+                        "USAR": True if score >= 0.45 else False,
+                        "ORDEM": 99,
                         "CAMPO_BASE_A": ca,
                         "CAMPO_BASE_B": cb,
-                        "SCORE": round(score * 100, 1),
                         "CONFIANCA": "Alta" if score >= 0.75 else "Média" if score >= 0.45 else "Baixa",
+                        "SCORE": round(score * 100, 1),
                     })
 
         if not rows:
@@ -1696,14 +1701,18 @@ def render_cruzamento_inteligente_v2():
         usados_a = set()
         usados_b = set()
         escolhidos = []
+        ordem = 1
 
         for _, r in sug.iterrows():
             a = r["CAMPO_BASE_A"]
             b = r["CAMPO_BASE_B"]
             if a not in usados_a and b not in usados_b:
-                escolhidos.append(r)
+                rr = r.copy()
+                rr["ORDEM"] = ordem
+                escolhidos.append(rr)
                 usados_a.add(a)
                 usados_b.add(b)
+                ordem += 1
             if len(escolhidos) >= top_n:
                 break
 
@@ -1780,7 +1789,7 @@ def render_cruzamento_inteligente_v2():
             width = min(max(max(len(x) for x in sample) + 2, 12), 42)
             ws.set_column(c, c, width)
 
-    def _to_excel_package(df_result, resumo_dict, compare_meta, ordered_cols, text_priority_cols=None):
+    def _to_excel_package(df_result, resumo_dict, compare_meta, text_priority_cols=None):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             wb = writer.book
@@ -1814,8 +1823,8 @@ def render_cruzamento_inteligente_v2():
                 ["Aderência (%)", resumo_dict.get("aderencia", 0.0)],
             ], columns=["Indicador", "Valor"])
 
-            resumo_df.to_excel(writer, sheet_name="PAINEL_EXECUTIVO", index=False)
-            wsr = writer.sheets["PAINEL_EXECUTIVO"]
+            resumo_df.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False)
+            wsr = writer.sheets["RESUMO_EXECUTIVO"]
             wsr.write(0, 0, "Indicador", fmt_hdr)
             wsr.write(0, 1, "Valor", fmt_hdr)
             wsr.set_column(0, 0, 32)
@@ -1839,20 +1848,20 @@ def render_cruzamento_inteligente_v2():
 
             ws_full = wb.add_worksheet("RESULTADO_COMPLETO")
             writer.sheets["RESULTADO_COMPLETO"] = ws_full
-            _write_df_excel(ws_full, df_result[ordered_cols], wb, text_priority_cols=text_priority_cols)
+            _write_df_excel(ws_full, df_result, wb, text_priority_cols=text_priority_cols)
 
             if "RESULTADO_FINAL" in df_result.columns:
                 df_aus = df_result[df_result["RESULTADO_FINAL"] == "Sem correspondência"].copy()
                 if not df_aus.empty:
-                    ws_aus = wb.add_worksheet("REGISTROS_AUSENTES")
-                    writer.sheets["REGISTROS_AUSENTES"] = ws_aus
-                    _write_df_excel(ws_aus, df_aus[ordered_cols], wb, text_priority_cols=text_priority_cols)
+                    ws_aus = wb.add_worksheet("NAO_ENCONTRADOS")
+                    writer.sheets["NAO_ENCONTRADOS"] = ws_aus
+                    _write_df_excel(ws_aus, df_aus, wb, text_priority_cols=text_priority_cols)
 
                 df_div = df_result[df_result["RESULTADO_FINAL"] == "Match com divergência"].copy()
                 if not df_div.empty:
                     ws_div = wb.add_worksheet("DIVERGENCIAS")
                     writer.sheets["DIVERGENCIAS"] = ws_div
-                    _write_df_excel(ws_div, df_div[ordered_cols], wb, text_priority_cols=text_priority_cols)
+                    _write_df_excel(ws_div, df_div, wb, text_priority_cols=text_priority_cols)
 
             for meta in compare_meta:
                 status_col = meta["status_col"]
@@ -1862,7 +1871,7 @@ def render_cruzamento_inteligente_v2():
                         sheet_name = _safe_sheet_name(f"DIV_{meta['label']}")
                         ws_cmp = wb.add_worksheet(sheet_name)
                         writer.sheets[sheet_name] = ws_cmp
-                        _write_df_excel(ws_cmp, df_cmp[ordered_cols], wb, text_priority_cols=text_priority_cols)
+                        _write_df_excel(ws_cmp, df_cmp, wb, text_priority_cols=text_priority_cols)
 
         output.seek(0)
         return output
@@ -1896,10 +1905,10 @@ def render_cruzamento_inteligente_v2():
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Base A — referência**")
-        base_a_file = st.file_uploader("Upload Base A (.xlsx ou .csv)", type=["xlsx", "csv"], key="procx_a")
+        base_a_file = st.file_uploader("Upload Base A (.xlsx ou .csv)", type=["xlsx", "csv"], key="procx2_a")
     with c2:
         st.markdown("**Base B — base a validar / confrontar**")
-        base_b_file = st.file_uploader("Upload Base B (.xlsx ou .csv)", type=["xlsx", "csv"], key="procx_b")
+        base_b_file = st.file_uploader("Upload Base B (.xlsx ou .csv)", type=["xlsx", "csv"], key="procx2_b")
 
     if not base_a_file or not base_b_file:
         st.info("Faça o upload das duas bases para continuar.")
@@ -1926,7 +1935,7 @@ def render_cruzamento_inteligente_v2():
     )
 
     # =====================================================
-    # 4) Preview
+    # 4) Visão inicial
     # =====================================================
     st.markdown("### 4) Visão inicial das bases")
     v1, v2 = st.columns(2)
@@ -1942,97 +1951,124 @@ def render_cruzamento_inteligente_v2():
     sug_df = _suggest_pairs(df_a, df_b)
 
     # =====================================================
-    # 5) Como localizar o registro correspondente?
+    # 5) Quais campos identificam o mesmo registro nas duas bases?
     # =====================================================
-    st.markdown("### 5) Como localizar o registro correspondente?")
-    st.caption("Escolha o campo principal de busca e, se necessário, um segundo campo para refinar a correspondência.")
+    st.markdown("### 5) Quais campos identificam o mesmo registro nas duas bases?")
+    st.caption("Selecione os campos que serão usados para localizar o mesmo item nas duas bases.")
 
-    main_a_default = list(df_a.columns)[0]
-    main_b_default = list(df_b.columns)[0]
-    aux_a_default = None
-    aux_b_default = None
+    if sug_df.empty:
+        key_rows = [{
+            "USAR": True,
+            "ORDEM": 1,
+            "CAMPO_BASE_A": list(df_a.columns)[0],
+            "CAMPO_BASE_B": list(df_b.columns)[0],
+            "CONFIANCA": "Manual",
+            "SCORE": 0.0,
+        }]
+    else:
+        key_rows = sug_df.head(8).copy()
 
-    if not sug_df.empty:
-        main_a_default = sug_df.iloc[0]["CAMPO_BASE_A"]
-        main_b_default = sug_df.iloc[0]["CAMPO_BASE_B"]
-        if len(sug_df) > 1:
-            aux_a_default = sug_df.iloc[1]["CAMPO_BASE_A"]
-            aux_b_default = sug_df.iloc[1]["CAMPO_BASE_B"]
+    key_df = st.data_editor(
+        pd.DataFrame(key_rows),
+        use_container_width=True,
+        height=280,
+        hide_index=True,
+        column_config={
+            "USAR": st.column_config.CheckboxColumn("Usar"),
+            "ORDEM": st.column_config.NumberColumn("Ordem", min_value=1, step=1),
+            "CAMPO_BASE_A": st.column_config.SelectboxColumn("Campo Base A", options=list(df_a.columns)),
+            "CAMPO_BASE_B": st.column_config.SelectboxColumn("Campo Base B", options=list(df_b.columns)),
+            "CONFIANCA": st.column_config.TextColumn("Confiança", disabled=True),
+            "SCORE": st.column_config.NumberColumn("Score", disabled=True),
+        },
+        key="key_fields_grid_v11"
+    )
 
-    all_a = list(df_a.columns)
-    all_b = list(df_b.columns)
+    selected_keys = key_df[key_df["USAR"] == True].copy().sort_values("ORDEM", ascending=True)
 
-    c_main1, c_main2 = st.columns(2)
-    with c_main1:
-        campo_principal_a = st.selectbox(
-            "Campo principal da Base A",
-            all_a,
-            index=all_a.index(main_a_default) if main_a_default in all_a else 0
-        )
-    with c_main2:
-        campo_principal_b = st.selectbox(
-            "Campo principal da Base B",
-            all_b,
-            index=all_b.index(main_b_default) if main_b_default in all_b else 0
-        )
+    if selected_keys.empty:
+        st.warning("Selecione pelo menos um campo para localizar o registro correspondente.")
+        return
 
-    usar_campo_aux = st.checkbox("Usar um segundo campo para refinar a busca", value=True if aux_a_default and aux_b_default else False)
+    # =====================================================
+    # 5.1) Algum desses campos precisa de tratamento especial?
+    # =====================================================
+    st.markdown("### 5.1) Algum desses campos precisa de tratamento especial?")
+    st.caption("Use esta etapa somente se algum campo precisar de ajuste antes da comparação.")
 
-    campo_aux_a = None
-    campo_aux_b = None
-    regra_aux_a = "Sem transformação"
-    regra_aux_b = "Sem transformação"
-    zfill_aux_a = 0
-    zfill_aux_b = 0
-    prefix_aux_a = ""
-    prefix_aux_b = ""
-
-    if usar_campo_aux:
-        c_aux1, c_aux2 = st.columns(2)
-        with c_aux1:
-            campo_aux_a = st.selectbox(
-                "Campo adicional da Base A",
-                all_a,
-                index=all_a.index(aux_a_default) if aux_a_default in all_a else 0
-            )
-        with c_aux2:
-            campo_aux_b = st.selectbox(
-                "Campo adicional da Base B",
-                all_b,
-                index=all_b.index(aux_b_default) if aux_b_default in all_b else 0
-            )
-
-        st.markdown("**Tratamento do campo adicional**")
-        t1, t2 = st.columns(2)
-        transform_opts = [
-            "Sem transformação",
-            "Somente dígitos",
-            "Ignorar zeros à esquerda",
-            "Zeros à esquerda",
-            "Prefixo + zeros à esquerda",
-        ]
-
-        default_regra_a = "Sem transformação"
-        default_regra_b = "Sem transformação"
-        default_zfill_a = 0
-        default_zfill_b = 0
+    treatment_rows = []
+    for _, r in selected_keys.iterrows():
+        default_mode_a = "Sem tratamento"
+        default_mode_b = "Sem tratamento"
+        default_chars_a = 0
+        default_chars_b = 0
         default_prefix_a = ""
         default_prefix_b = ""
+        default_zfill_a = 0
+        default_zfill_b = 0
 
-        if campo_aux_a and campo_aux_b:
-            if "FILIAL" in str(campo_aux_a).upper() and "FILIAL" in str(campo_aux_b).upper():
-                default_regra_a = "Prefixo + zeros à esquerda"
-                default_zfill_a = 2
-                default_prefix_a = "01"
+        campo_a = str(r["CAMPO_BASE_A"]).upper()
+        campo_b = str(r["CAMPO_BASE_B"]).upper()
 
-        with t1:
-            regra_aux_a = st.selectbox("Regra Base A", transform_opts, index=transform_opts.index(default_regra_a))
-            zfill_aux_a = st.number_input("Zeros Base A", min_value=0, max_value=10, value=int(default_zfill_a), step=1)
-            prefix_aux_a = st.text_input("Prefixo Base A", value=default_prefix_a)
-        with t2:
-            regra_aux_b = st.selectbox("Regra Base B", transform_opts, index=transform_opts.index(default_regra_b))
-            zfill_aux_b = st.number_input("Zeros Base B", min_value=0, max_value=10, value=int(default_zfill_b), step=1)
-            prefix_aux_b = st.text_input("Prefixo Base B", value=default_prefix_b)
+        if "FILIAL" in campo_a and "FILIAL" in campo_b:
+            default_mode_a = "Prefixo + zeros à esquerda"
+            default_prefix_a = "01"
+            default_zfill_a = 2
+
+        treatment_rows.append({
+            "CAMPO_BASE_A": r["CAMPO_BASE_A"],
+            "CAMPO_BASE_B": r["CAMPO_BASE_B"],
+            "TRATAR": False if default_mode_a == "Sem tratamento" and default_mode_b == "Sem tratamento" else True,
+            "TRATAMENTO_BASE_A": default_mode_a,
+            "CARACTERES_A": default_chars_a,
+            "PREFIXO_A": default_prefix_a,
+            "ZEROS_A": default_zfill_a,
+            "TRATAMENTO_BASE_B": default_mode_b,
+            "CARACTERES_B": default_chars_b,
+            "PREFIXO_B": default_prefix_b,
+            "ZEROS_B": default_zfill_b,
+        })
+
+    treatment_df = st.data_editor(
+        pd.DataFrame(treatment_rows),
+        use_container_width=True,
+        height=220,
+        hide_index=True,
+        column_config={
+            "CAMPO_BASE_A": st.column_config.TextColumn("Campo Base A", disabled=True),
+            "CAMPO_BASE_B": st.column_config.TextColumn("Campo Base B", disabled=True),
+            "TRATAR": st.column_config.CheckboxColumn("Tratar"),
+            "TRATAMENTO_BASE_A": st.column_config.SelectboxColumn(
+                "Tratamento Base A",
+                options=[
+                    "Sem tratamento",
+                    "Considerar apenas números",
+                    "Ignorar zeros à esquerda",
+                    "Considerar os primeiros caracteres",
+                    "Considerar os últimos caracteres",
+                    "Prefixo + zeros à esquerda",
+                ]
+            ),
+            "CARACTERES_A": st.column_config.NumberColumn("Caracteres A", min_value=0, step=1),
+            "PREFIXO_A": st.column_config.TextColumn("Prefixo A"),
+            "ZEROS_A": st.column_config.NumberColumn("Zeros A", min_value=0, step=1),
+            "TRATAMENTO_BASE_B": st.column_config.SelectboxColumn(
+                "Tratamento Base B",
+                options=[
+                    "Sem tratamento",
+                    "Considerar apenas números",
+                    "Ignorar zeros à esquerda",
+                    "Considerar os primeiros caracteres",
+                    "Considerar os últimos caracteres",
+                    "Prefixo + zeros à esquerda",
+                ]
+            ),
+            "CARACTERES_B": st.column_config.NumberColumn("Caracteres B", min_value=0, step=1),
+            "PREFIXO_B": st.column_config.TextColumn("Prefixo B"),
+            "ZEROS_B": st.column_config.NumberColumn("Zeros B", min_value=0, step=1),
+        },
+        key="treatment_grid_v11"
+    )
 
     # =====================================================
     # 6) Quais campos deseja validar?
@@ -2040,56 +2076,50 @@ def render_cruzamento_inteligente_v2():
     st.markdown("### 6) Quais campos deseja validar para saber se os valores são coerentes?")
     st.caption("Depois de localizar o mesmo registro nas duas bases, o sistema irá comparar os campos abaixo.")
 
-    compare_rows = []
-    used_a = {campo_principal_a}
-    used_b = {campo_principal_b}
-    if campo_aux_a:
-        used_a.add(campo_aux_a)
-    if campo_aux_b:
-        used_b.add(campo_aux_b)
+    used_a = set(selected_keys["CAMPO_BASE_A"].tolist())
+    used_b = set(selected_keys["CAMPO_BASE_B"].tolist())
 
+    compare_rows = []
     if not sug_df.empty:
         tmp = sug_df[
             (~sug_df["CAMPO_BASE_A"].isin(used_a)) &
             (~sug_df["CAMPO_BASE_B"].isin(used_b))
         ].copy()
 
-        for i, (_, r) in enumerate(tmp.head(6).iterrows(), start=1):
+        for i, (_, r) in enumerate(tmp.head(8).iterrows(), start=1):
             compare_rows.append({
                 "COMPARAR": True if i <= 4 else False,
                 "ORDEM": i,
                 "CAMPO_BASE_A": r["CAMPO_BASE_A"],
                 "CAMPO_BASE_B": r["CAMPO_BASE_B"],
                 "TIPO": "Numérico",
-                "TOLERANCIA": 0.01
+                "TOLERANCIA": 0.00
             })
 
     if not compare_rows:
-        compare_rows.append({
+        compare_rows = [{
             "COMPARAR": True,
             "ORDEM": 1,
-            "CAMPO_BASE_A": all_a[0],
-            "CAMPO_BASE_B": all_b[0],
+            "CAMPO_BASE_A": list(df_a.columns)[0],
+            "CAMPO_BASE_B": list(df_b.columns)[0],
             "TIPO": "Numérico",
-            "TOLERANCIA": 0.01
-        })
-
-    compare_df = pd.DataFrame(compare_rows)
+            "TOLERANCIA": 0.00
+        }]
 
     compare_df = st.data_editor(
-        compare_df,
+        pd.DataFrame(compare_rows),
         use_container_width=True,
         height=260,
         hide_index=True,
         column_config={
             "COMPARAR": st.column_config.CheckboxColumn("Comparar"),
             "ORDEM": st.column_config.NumberColumn("Ordem", min_value=1, step=1),
-            "CAMPO_BASE_A": st.column_config.SelectboxColumn("Campo Base A", options=all_a),
-            "CAMPO_BASE_B": st.column_config.SelectboxColumn("Campo Base B", options=all_b),
+            "CAMPO_BASE_A": st.column_config.SelectboxColumn("Campo Base A", options=list(df_a.columns)),
+            "CAMPO_BASE_B": st.column_config.SelectboxColumn("Campo Base B", options=list(df_b.columns)),
             "TIPO": st.column_config.SelectboxColumn("Tipo", options=["Numérico", "Texto exato", "Texto normalizado"]),
             "TOLERANCIA": st.column_config.NumberColumn("Tolerância", min_value=0.0, step=0.01),
         },
-        key="compare_pairs_v10"
+        key="compare_fields_grid_v11"
     )
 
     selected_compares = compare_df[compare_df["COMPARAR"] == True].copy().sort_values("ORDEM", ascending=True)
@@ -2099,45 +2129,14 @@ def render_cruzamento_inteligente_v2():
     # =====================================================
     st.markdown("### 7) Como deseja receber o resultado?")
     mostrar_apenas_divergencias = st.checkbox("Mostrar apenas divergências no resultado", value=False)
-    incluir_nao_encontrados = st.checkbox("Incluir registros sem correspondência", value=True)
-    gerar_resumo_exec = st.checkbox("Gerar resumo executivo no Excel", value=True)
+    incluir_nao_encontrados = st.checkbox("Incluir campos não encontrados", value=True)
+    gerar_resumo_exec = st.checkbox("Gerar resumo executivo", value=True)
     gerar_abas_detalhadas = st.checkbox("Gerar abas detalhadas por campo comparado", value=True)
 
     # =====================================================
-    # 8) Ordem das colunas
+    # 8) Processar
     # =====================================================
-    st.markdown("### 8) Ordem das colunas no Excel")
-    preview_cols = [
-        f"CHAVE_Base A_{campo_principal_a}",
-        f"CHAVE_Base B_{campo_principal_b}",
-    ]
-    if usar_campo_aux and campo_aux_a and campo_aux_b:
-        preview_cols.extend([
-            f"CHAVE_Base A_{campo_aux_a}",
-            f"CHAVE_Base B_{campo_aux_b}",
-        ])
-
-    for _, r in selected_compares.iterrows():
-        preview_cols.extend([
-            f"VALOR_Base A_{r['CAMPO_BASE_A']}",
-            f"VALOR_Base B_{r['CAMPO_BASE_B']}",
-            f"DIF_{r['CAMPO_BASE_A']}__{r['CAMPO_BASE_B']}",
-            f"STATUS_{r['CAMPO_BASE_A']}__{r['CAMPO_BASE_B']}",
-        ])
-
-    preview_cols.extend(["STATUS_MATCH", "RESULTADO_FINAL"])
-
-    preferred_cols = st.multiselect(
-        "Colunas prioritárias no Excel",
-        options=list(dict.fromkeys(preview_cols)),
-        default=list(dict.fromkeys(preview_cols)),
-        key="procx_pref_cols"
-    )
-
-    # =====================================================
-    # 9) Processar
-    # =====================================================
-    st.markdown("### 9) Processar análise")
+    st.markdown("### 8) Processar análise")
     processar = st.button("Executar análise", type="primary", use_container_width=True)
     if not processar:
         return
@@ -2151,17 +2150,53 @@ def render_cruzamento_inteligente_v2():
         for c in base_b.columns:
             base_b[c] = _force_text_series(base_b[c])
 
-        base_a["__KEY_MAIN__"] = _apply_transform_series(base_a[campo_principal_a], "Sem transformação")
-        base_b["__KEY_MAIN__"] = _apply_transform_series(base_b[campo_principal_b], "Sem transformação")
+        key_cols_a = []
+        key_cols_b = []
 
-        key_cols_a = ["__KEY_MAIN__"]
-        key_cols_b = ["__KEY_MAIN__"]
+        for i, (_, key_row) in enumerate(selected_keys.iterrows(), start=1):
+            tr = treatment_df[
+                (treatment_df["CAMPO_BASE_A"] == key_row["CAMPO_BASE_A"]) &
+                (treatment_df["CAMPO_BASE_B"] == key_row["CAMPO_BASE_B"])
+            ]
 
-        if usar_campo_aux and campo_aux_a and campo_aux_b:
-            base_a["__KEY_AUX__"] = _apply_transform_series(base_a[campo_aux_a], regra_aux_a, zfill_aux_a, prefix_aux_a)
-            base_b["__KEY_AUX__"] = _apply_transform_series(base_b[campo_aux_b], regra_aux_b, zfill_aux_b, prefix_aux_b)
-            key_cols_a.append("__KEY_AUX__")
-            key_cols_b.append("__KEY_AUX__")
+            if len(tr):
+                tr = tr.iloc[0]
+            else:
+                tr = {
+                    "TRATAR": False,
+                    "TRATAMENTO_BASE_A": "Sem tratamento",
+                    "CARACTERES_A": 0,
+                    "PREFIXO_A": "",
+                    "ZEROS_A": 0,
+                    "TRATAMENTO_BASE_B": "Sem tratamento",
+                    "CARACTERES_B": 0,
+                    "PREFIXO_B": "",
+                    "ZEROS_B": 0,
+                }
+
+            col_key_a = f"__KEY_A_{i}"
+            col_key_b = f"__KEY_B_{i}"
+
+            mode_a = tr["TRATAMENTO_BASE_A"] if bool(tr["TRATAR"]) else "Sem tratamento"
+            mode_b = tr["TRATAMENTO_BASE_B"] if bool(tr["TRATAR"]) else "Sem tratamento"
+
+            base_a[col_key_a] = _apply_transform_series(
+                base_a[key_row["CAMPO_BASE_A"]],
+                mode_a,
+                chars_n=tr["CARACTERES_A"],
+                prefix=tr["PREFIXO_A"],
+                zfill_size=tr["ZEROS_A"]
+            )
+            base_b[col_key_b] = _apply_transform_series(
+                base_b[key_row["CAMPO_BASE_B"]],
+                mode_b,
+                chars_n=tr["CARACTERES_B"],
+                prefix=tr["PREFIXO_B"],
+                zfill_size=tr["ZEROS_B"]
+            )
+
+            key_cols_a.append(col_key_a)
+            key_cols_b.append(col_key_b)
 
         base_a["__KEY__"] = _build_key(base_a, key_cols_a)
         base_b["__KEY__"] = _build_key(base_b, key_cols_b)
@@ -2205,12 +2240,9 @@ def render_cruzamento_inteligente_v2():
                 row_a = row_o if origem_nome == "Base A" else row_d
                 row_b = row_d if origem_nome == "Base A" else row_o
 
-                row_out[f"CHAVE_Base A_{campo_principal_a}"] = row_a.get(campo_principal_a, "")
-                row_out[f"CHAVE_Base B_{campo_principal_b}"] = row_b.get(campo_principal_b, "")
-
-                if usar_campo_aux and campo_aux_a and campo_aux_b:
-                    row_out[f"CHAVE_Base A_{campo_aux_a}"] = row_a.get(campo_aux_a, "")
-                    row_out[f"CHAVE_Base B_{campo_aux_b}"] = row_b.get(campo_aux_b, "")
+                for _, key_row in selected_keys.iterrows():
+                    row_out[f"CHAVE_Base A_{key_row['CAMPO_BASE_A']}"] = row_a.get(key_row["CAMPO_BASE_A"], "")
+                    row_out[f"CHAVE_Base B_{key_row['CAMPO_BASE_B']}"] = row_b.get(key_row["CAMPO_BASE_B"], "")
 
                 divergencia_encontrada = False
 
@@ -2252,17 +2284,50 @@ def render_cruzamento_inteligente_v2():
 
         df_result = pd.DataFrame(out_rows)
 
-        for _, cp in selected_compares.iterrows():
-            compare_meta.append({
-                "label": f"{cp['CAMPO_BASE_A']} x {cp['CAMPO_BASE_B']}",
-                "status_col": f"STATUS_{cp['CAMPO_BASE_A']}__{cp['CAMPO_BASE_B']}"
-            })
-
         if not incluir_nao_encontrados:
             df_result = df_result[df_result["RESULTADO_FINAL"] != "Sem correspondência"].copy()
 
         if mostrar_apenas_divergencias:
             df_result = df_result[df_result["RESULTADO_FINAL"] == "Match com divergência"].copy()
+
+        key_order_cols = []
+        for _, key_row in selected_keys.iterrows():
+            c1 = f"CHAVE_Base A_{key_row['CAMPO_BASE_A']}"
+            c2 = f"CHAVE_Base B_{key_row['CAMPO_BASE_B']}"
+            if c1 in df_result.columns:
+                key_order_cols.append(c1)
+            if c2 in df_result.columns:
+                key_order_cols.append(c2)
+
+        compare_order_cols = []
+        for _, cp in selected_compares.iterrows():
+            cols_cmp = [
+                f"VALOR_Base A_{cp['CAMPO_BASE_A']}",
+                f"VALOR_Base B_{cp['CAMPO_BASE_B']}",
+                f"DIF_{cp['CAMPO_BASE_A']}__{cp['CAMPO_BASE_B']}",
+                f"STATUS_{cp['CAMPO_BASE_A']}__{cp['CAMPO_BASE_B']}",
+            ]
+            for c in cols_cmp:
+                if c in df_result.columns:
+                    compare_order_cols.append(c)
+
+            compare_meta.append({
+                "label": f"{cp['CAMPO_BASE_A']} x {cp['CAMPO_BASE_B']}",
+                "status_col": f"STATUS_{cp['CAMPO_BASE_A']}__{cp['CAMPO_BASE_B']}"
+            })
+
+        final_cols = []
+        for c in ["BASE_VALIDADA", "BASE_REFERENCIA", "CHAVE_PROCESSADA"]:
+            if c in df_result.columns:
+                final_cols.append(c)
+        final_cols.extend(key_order_cols)
+        final_cols.extend(compare_order_cols)
+        for c in ["STATUS_MATCH", "RESULTADO_FINAL"]:
+            if c in df_result.columns:
+                final_cols.append(c)
+
+        final_cols = final_cols + [c for c in df_result.columns if c not in final_cols]
+        df_result = df_result[final_cols].copy()
 
         total = len(df_result)
         encontrados = int(df_result["STATUS_MATCH"].astype(str).eq("Encontrado").sum()) if total else 0
@@ -2270,9 +2335,6 @@ def render_cruzamento_inteligente_v2():
         duplicados_result = int(df_result["RESULTADO_FINAL"].astype(str).eq("Duplicidade").sum()) if total else 0
         divergentes = int(df_result["RESULTADO_FINAL"].astype(str).eq("Match com divergência").sum()) if total else 0
         aderencia = ((encontrados / total) * 100.0) if total else 0.0
-
-        all_cols = list(df_result.columns)
-        ordered_cols = [c for c in preferred_cols if c in all_cols] + [c for c in all_cols if c not in preferred_cols]
 
         resumo_dict = {
             "objetivo": objetivo_label,
@@ -2292,9 +2354,8 @@ def render_cruzamento_inteligente_v2():
 
         excel_bytes = _to_excel_package(
             df_result=df_result,
-            resumo_dict=resumo_dict,
+            resumo_dict=resumo_dict if gerar_resumo_exec else resumo_dict,
             compare_meta=compare_meta if gerar_abas_detalhadas else [],
-            ordered_cols=ordered_cols,
             text_priority_cols=text_priority_cols
         )
 
@@ -2311,12 +2372,12 @@ def render_cruzamento_inteligente_v2():
     with m5:
         st.metric("Divergências", divergentes)
 
-    st.dataframe(df_result[ordered_cols], use_container_width=True, height=520)
+    st.dataframe(df_result, use_container_width=True, height=520)
 
     st.download_button(
         "Baixar resultado em Excel",
         data=excel_bytes,
-        file_name=f"Match_Inteligente_PROCX_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        file_name=f"Match_Inteligente_PROCX_V2_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
