@@ -1536,7 +1536,6 @@ load_learning()
 # Match Inteligente V3
 # =========================================================
 def render_cruzamento_inteligente_v2():
-    def render_cruzamento_inteligente_v2():
     st.title("Match Inteligente")
     st.caption("Cruze, compare e identifique relações entre bases com sugestões automáticas por nome e conteúdo.")
 
