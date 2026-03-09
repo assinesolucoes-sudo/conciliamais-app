@@ -1612,16 +1612,6 @@ def render_cruzamento_inteligente_v2():
             key = key + "||" + df[c].astype(str)
         return key
 
-    def _find_duplicates(df, key_col_name="__KEY__"):
-        if key_col_name not in df.columns:
-            return pd.DataFrame()
-        dup_mask = df.duplicated(subset=[key_col_name], keep=False)
-        dup_df = df.loc[dup_mask].copy()
-        if dup_df.empty:
-            return dup_df
-        dup_df["QTD_REPETICAO"] = dup_df.groupby(key_col_name)[key_col_name].transform("size")
-        return dup_df.sort_values([key_col_name])
-
     def _name_similarity(a, b):
         na = _norm_name(a)
         nb = _norm_name(b)
@@ -1779,7 +1769,7 @@ def render_cruzamento_inteligente_v2():
                     or "STATUS" in col_up
                 ):
                     ws.write_string(r + 1, c, str(val), fmt_text)
-                elif isinstance(val, (int, float, np.integer, np.floating)) and ("VALOR" in col_up or "DIF" in col_up):
+                elif isinstance(val, (int, float, np.integer, np.floating)) and ("VALOR" in col_up or "DIF" in col_up or "SOMA" in col_up):
                     ws.write_number(r + 1, c, float(val), fmt_num)
                 else:
                     ws.write_string(r + 1, c, str(val), fmt_text)
@@ -1789,7 +1779,80 @@ def render_cruzamento_inteligente_v2():
             width = min(max(max(len(x) for x in sample) + 2, 12), 42)
             ws.set_column(c, c, width)
 
-    def _to_excel_package(df_result, resumo_dict, compare_meta, text_priority_cols=None):
+    def _build_totalizador_filial(df_result, compare_meta):
+        if df_result is None or df_result.empty:
+            return pd.DataFrame()
+
+        filial_col = None
+        for c in df_result.columns:
+            cu = str(c).upper()
+            if "CHAVE_BASE A_" in cu and "FILIAL" in cu:
+                filial_col = c
+                break
+        if filial_col is None:
+            for c in df_result.columns:
+                cu = str(c).upper()
+                if "CHAVE_BASE B_" in cu and "FILIAL" in cu:
+                    filial_col = c
+                    break
+        if filial_col is None:
+            return pd.DataFrame()
+
+        work = df_result.copy()
+        work["FILIAL_TOTALIZADOR"] = work[filial_col].fillna("").astype(str)
+
+        diff_cols = []
+        for meta in compare_meta:
+            base = meta["label"]
+            # label formato: A x B
+            if " x " in base:
+                a, b = base.split(" x ", 1)
+                c = f"DIF_{a}__{b}"
+                if c in work.columns:
+                    diff_cols.append(c)
+
+        if not diff_cols:
+            grp = (
+                work.groupby("FILIAL_TOTALIZADOR", dropna=False)
+                .agg(
+                    QTDE_REGISTROS=("FILIAL_TOTALIZADOR", "size"),
+                    QTDE_DIVERGENCIAS=("RESULTADO_FINAL", lambda s: int((s.astype(str) == "Match com divergência").sum())),
+                    QTDE_NAO_ENCONTRADOS=("RESULTADO_FINAL", lambda s: int((s.astype(str) == "Sem correspondência").sum())),
+                )
+                .reset_index()
+                .rename(columns={"FILIAL_TOTALIZADOR": "FILIAL"})
+            )
+            return grp
+
+        for c in diff_cols:
+            work[c] = pd.to_numeric(work[c], errors="coerce").fillna(0.0)
+
+        agg_dict = {
+            "QTDE_REGISTROS": ("FILIAL_TOTALIZADOR", "size"),
+            "QTDE_DIVERGENCIAS": ("RESULTADO_FINAL", lambda s: int((s.astype(str) == "Match com divergência").sum())),
+            "QTDE_NAO_ENCONTRADOS": ("RESULTADO_FINAL", lambda s: int((s.astype(str) == "Sem correspondência").sum())),
+        }
+
+        grp = (
+            work.groupby("FILIAL_TOTALIZADOR", dropna=False)
+            .agg(
+                QTDE_REGISTROS=("FILIAL_TOTALIZADOR", "size"),
+                QTDE_DIVERGENCIAS=("RESULTADO_FINAL", lambda s: int((s.astype(str) == "Match com divergência").sum())),
+                QTDE_NAO_ENCONTRADOS=("RESULTADO_FINAL", lambda s: int((s.astype(str) == "Sem correspondência").sum())),
+            )
+            .reset_index()
+            .rename(columns={"FILIAL_TOTALIZADOR": "FILIAL"})
+        )
+
+        for c in diff_cols:
+            grp_nome = f"SOMA_{c}"
+            tmp = work.groupby("FILIAL_TOTALIZADOR", dropna=False)[c].sum().reset_index()
+            tmp.columns = ["FILIAL", grp_nome]
+            grp = grp.merge(tmp, on="FILIAL", how="left")
+
+        return grp
+
+    def _to_excel_package(df_result, resumo_dict, compare_meta, text_priority_cols=None, gerar_totalizador_filial=False):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             wb = writer.book
@@ -1873,6 +1936,13 @@ def render_cruzamento_inteligente_v2():
                         writer.sheets[sheet_name] = ws_cmp
                         _write_df_excel(ws_cmp, df_cmp, wb, text_priority_cols=text_priority_cols)
 
+            if gerar_totalizador_filial:
+                total_filial = _build_totalizador_filial(df_result, compare_meta)
+                if not total_filial.empty:
+                    ws_tot = wb.add_worksheet("TOTALIZADOR_FILIAL")
+                    writer.sheets["TOTALIZADOR_FILIAL"] = ws_tot
+                    _write_df_excel(ws_tot, total_filial, wb, text_priority_cols=["FILIAL"])
+
         output.seek(0)
         return output
 
@@ -1890,14 +1960,6 @@ def render_cruzamento_inteligente_v2():
         ]
     )
 
-    objetivo_map = {
-        "Comparar valores de registros correspondentes": "comparar",
-        "Encontrar registros faltantes entre as bases": "faltantes",
-        "Identificar registros duplicados": "duplicidades",
-        "Completar informações de uma base com a outra": "enriquecer",
-    }
-    objetivo = objetivo_map[objetivo_label]
-
     # =====================================================
     # 2) Upload
     # =====================================================
@@ -1905,10 +1967,10 @@ def render_cruzamento_inteligente_v2():
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Base A — referência**")
-        base_a_file = st.file_uploader("Upload Base A (.xlsx ou .csv)", type=["xlsx", "csv"], key="procx2_a")
+        base_a_file = st.file_uploader("Upload Base A (.xlsx ou .csv)", type=["xlsx", "csv"], key="procx3_a")
     with c2:
         st.markdown("**Base B — base a validar / confrontar**")
-        base_b_file = st.file_uploader("Upload Base B (.xlsx ou .csv)", type=["xlsx", "csv"], key="procx2_b")
+        base_b_file = st.file_uploader("Upload Base B (.xlsx ou .csv)", type=["xlsx", "csv"], key="procx3_b")
 
     if not base_a_file or not base_b_file:
         st.info("Faça o upload das duas bases para continuar.")
@@ -1951,7 +2013,7 @@ def render_cruzamento_inteligente_v2():
     sug_df = _suggest_pairs(df_a, df_b)
 
     # =====================================================
-    # 5) Quais campos identificam o mesmo registro nas duas bases?
+    # 5) Campos de localização
     # =====================================================
     st.markdown("### 5) Quais campos identificam o mesmo registro nas duas bases?")
     st.caption("Selecione os campos que serão usados para localizar o mesmo item nas duas bases.")
@@ -1981,17 +2043,28 @@ def render_cruzamento_inteligente_v2():
             "CONFIANCA": st.column_config.TextColumn("Confiança", disabled=True),
             "SCORE": st.column_config.NumberColumn("Score", disabled=True),
         },
-        key="key_fields_grid_v11"
+        key="key_fields_grid_v12"
     )
 
-    selected_keys = key_df[key_df["USAR"] == True].copy().sort_values("ORDEM", ascending=True)
+    selected_keys = key_df[key_df["USAR"] == True].copy()
+    selected_keys = selected_keys[
+        selected_keys["CAMPO_BASE_A"].notna() &
+        selected_keys["CAMPO_BASE_B"].notna()
+    ].copy()
+    selected_keys["CAMPO_BASE_A"] = selected_keys["CAMPO_BASE_A"].astype(str).str.strip()
+    selected_keys["CAMPO_BASE_B"] = selected_keys["CAMPO_BASE_B"].astype(str).str.strip()
+    selected_keys = selected_keys[
+        selected_keys["CAMPO_BASE_A"].isin(df_a.columns) &
+        selected_keys["CAMPO_BASE_B"].isin(df_b.columns)
+    ].copy()
+    selected_keys = selected_keys.sort_values("ORDEM", ascending=True)
 
     if selected_keys.empty:
         st.warning("Selecione pelo menos um campo para localizar o registro correspondente.")
         return
 
     # =====================================================
-    # 5.1) Algum desses campos precisa de tratamento especial?
+    # 5.1) Tratamento especial
     # =====================================================
     st.markdown("### 5.1) Algum desses campos precisa de tratamento especial?")
     st.caption("Use esta etapa somente se algum campo precisar de ajuste antes da comparação.")
@@ -2067,11 +2140,11 @@ def render_cruzamento_inteligente_v2():
             "PREFIXO_B": st.column_config.TextColumn("Prefixo B"),
             "ZEROS_B": st.column_config.NumberColumn("Zeros B", min_value=0, step=1),
         },
-        key="treatment_grid_v11"
+        key="treatment_grid_v12"
     )
 
     # =====================================================
-    # 6) Quais campos deseja validar?
+    # 6) Campos a validar
     # =====================================================
     st.markdown("### 6) Quais campos deseja validar para saber se os valores são coerentes?")
     st.caption("Depois de localizar o mesmo registro nas duas bases, o sistema irá comparar os campos abaixo.")
@@ -2119,19 +2192,31 @@ def render_cruzamento_inteligente_v2():
             "TIPO": st.column_config.SelectboxColumn("Tipo", options=["Numérico", "Texto exato", "Texto normalizado"]),
             "TOLERANCIA": st.column_config.NumberColumn("Tolerância", min_value=0.0, step=0.01),
         },
-        key="compare_fields_grid_v11"
+        key="compare_fields_grid_v12"
     )
 
-    selected_compares = compare_df[compare_df["COMPARAR"] == True].copy().sort_values("ORDEM", ascending=True)
+    selected_compares = compare_df[compare_df["COMPARAR"] == True].copy()
+    selected_compares = selected_compares[
+        selected_compares["CAMPO_BASE_A"].notna() &
+        selected_compares["CAMPO_BASE_B"].notna()
+    ].copy()
+    selected_compares["CAMPO_BASE_A"] = selected_compares["CAMPO_BASE_A"].astype(str).str.strip()
+    selected_compares["CAMPO_BASE_B"] = selected_compares["CAMPO_BASE_B"].astype(str).str.strip()
+    selected_compares = selected_compares[
+        selected_compares["CAMPO_BASE_A"].isin(df_a.columns) &
+        selected_compares["CAMPO_BASE_B"].isin(df_b.columns)
+    ].copy()
+    selected_compares = selected_compares.sort_values("ORDEM", ascending=True)
 
     # =====================================================
-    # 7) Como deseja receber o resultado?
+    # 7) Resultado
     # =====================================================
     st.markdown("### 7) Como deseja receber o resultado?")
     mostrar_apenas_divergencias = st.checkbox("Mostrar apenas divergências no resultado", value=False)
     incluir_nao_encontrados = st.checkbox("Incluir campos não encontrados", value=True)
     gerar_resumo_exec = st.checkbox("Gerar resumo executivo", value=True)
     gerar_abas_detalhadas = st.checkbox("Gerar abas detalhadas por campo comparado", value=True)
+    gerar_totalizador_filial = st.checkbox("Gerar totalizador por filial", value=False)
 
     # =====================================================
     # 8) Processar
@@ -2154,6 +2239,9 @@ def render_cruzamento_inteligente_v2():
         key_cols_b = []
 
         for i, (_, key_row) in enumerate(selected_keys.iterrows(), start=1):
+            if key_row["CAMPO_BASE_A"] not in base_a.columns or key_row["CAMPO_BASE_B"] not in base_b.columns:
+                continue
+
             tr = treatment_df[
                 (treatment_df["CAMPO_BASE_A"] == key_row["CAMPO_BASE_A"]) &
                 (treatment_df["CAMPO_BASE_B"] == key_row["CAMPO_BASE_B"])
@@ -2354,9 +2442,10 @@ def render_cruzamento_inteligente_v2():
 
         excel_bytes = _to_excel_package(
             df_result=df_result,
-            resumo_dict=resumo_dict if gerar_resumo_exec else resumo_dict,
+            resumo_dict=resumo_dict,
             compare_meta=compare_meta if gerar_abas_detalhadas else [],
-            text_priority_cols=text_priority_cols
+            text_priority_cols=text_priority_cols,
+            gerar_totalizador_filial=gerar_totalizador_filial
         )
 
     st.markdown("### Resultado da análise")
@@ -2377,7 +2466,7 @@ def render_cruzamento_inteligente_v2():
     st.download_button(
         "Baixar resultado em Excel",
         data=excel_bytes,
-        file_name=f"Match_Inteligente_PROCX_V2_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        file_name=f"Match_Inteligente_PROCX_V3_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
