@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Match Inteligente V20", layout="wide")
+st.set_page_config(page_title="Match Inteligente V22", layout="wide")
 
 # =========================================================
 # Utilidades básicas
@@ -217,750 +217,569 @@ def apply_rules_to_base1(df_a: pd.DataFrame, rules: List[dict]) -> Tuple[pd.Data
             continue
         if source_col and source_col in df.columns:
             new_col = f"[MAP] {source_col} -> {target_col or 'Destino'}"
-            df[new_col] = _force_text_series(df[source_col]).map(lambda x: mapping.get(_norm_text(x), mapping.get(str(x), "")))
-            created.append({"label": new_col, "source_col": source_col, "target_col": target_col, "new_col": new_col})
+            source_series = _force_text_series(df[source_col])
+            df[new_col] = source_series.map(lambda v: mapping.get(v, mapping.get(_norm_text(v), "")))
+            created.append({
+                "mapped_col": new_col,
+                "source_col": source_col,
+                "target_col": target_col,
+            })
     return df, created
 
 
-def build_analysis(
-    df_a: pd.DataFrame,
-    df_b: pd.DataFrame,
-    base1_name: str,
-    base2_name: str,
-    key_pairs: List[dict],
-    compare_pairs: List[dict],
-    rules: List[dict],
-    executive_group_labels: List[str],
-    executive_value_labels: List[str],
-) -> dict:
-    if not key_pairs:
-        raise ValueError("Adicione pelo menos um par de campos identificadores.")
-    if not compare_pairs:
-        raise ValueError("Adicione pelo menos um par de campos de valor para confronto.")
+def build_pair_key_options(cols_a: List[str], cols_b: List[str], mapped_info: List[dict]) -> Tuple[List[str], Dict[str, str]]:
+    # label amigável -> coluna real Base1 (ou campo mapeado)
+    opts_a = list(cols_a)
+    for m in mapped_info:
+        if m["mapped_col"] not in opts_a:
+            opts_a.append(m["mapped_col"])
+    base1_map = {c: c for c in opts_a}
+    return opts_a, base1_map
 
-    a, mapped_fields = apply_rules_to_base1(df_a, rules)
-    b = df_b.copy()
 
-    a["__row_a"] = np.arange(len(a))
-    b["__row_b"] = np.arange(len(b))
+def compose_match(df_a: pd.DataFrame,
+                  df_b: pd.DataFrame,
+                  pairs: List[dict],
+                  value_pairs: List[dict]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    # pares: [{a_col, b_col, label}]
+    # value_pairs: [{a_val, b_val, label}]
 
-    key_meta = []
-    key_cols_a = []
-    key_cols_b = []
-    for i, pair in enumerate(key_pairs, start=1):
-        col_a = pair["base1_col"]
-        col_b = pair["base2_col"]
-        label = pair.get("label") or _suggest_label(col_a, col_b)
-        norm_a = f"__key_a_{i}"
-        norm_b = f"__key_b_{i}"
-        disp_a = f"__disp_a_{i}"
-        disp_b = f"__disp_b_{i}"
-        canon = f"DIM__{label}"
+    work_a = df_a.copy()
+    work_b = df_b.copy()
 
-        if col_a not in a.columns:
-            raise ValueError(f"Campo da Base 1 não encontrado: {col_a}")
-        if col_b not in b.columns:
-            raise ValueError(f"Campo da Base 2 não encontrado: {col_b}")
+    # chaves lógicas para cada dimensão
+    canonical_labels = []
+    for p in pairs:
+        label = p["label"]
+        canonical_labels.append(label)
+        work_a[f"KEY_{label}"] = _normalize_key_series(work_a[p["a_col"]]) if p["a_col"] in work_a.columns else ""
+        work_b[f"KEY_{label}"] = _normalize_key_series(work_b[p["b_col"]]) if p["b_col"] in work_b.columns else ""
 
-        a[norm_a] = _normalize_key_series(a[col_a])
-        b[norm_b] = _normalize_key_series(b[col_b])
-        a[disp_a] = _force_text_series(a[col_a])
-        b[disp_b] = _force_text_series(b[col_b])
+    if not canonical_labels:
+        work_a["__JOIN__"] = "__ALL__"
+        work_b["__JOIN__"] = "__ALL__"
+    else:
+        a_parts = [work_a[f"KEY_{lbl}"] for lbl in canonical_labels]
+        b_parts = [work_b[f"KEY_{lbl}"] for lbl in canonical_labels]
+        work_a["__JOIN__"] = a_parts[0]
+        work_b["__JOIN__"] = b_parts[0]
+        for i in range(1, len(canonical_labels)):
+            work_a["__JOIN__"] = work_a["__JOIN__"] + "||" + a_parts[i]
+            work_b["__JOIN__"] = work_b["__JOIN__"] + "||" + b_parts[i]
 
-        key_cols_a.append(norm_a)
-        key_cols_b.append(norm_b)
-        key_meta.append({
-            "label": label,
-            "col_a": col_a,
-            "col_b": col_b,
-            "norm_a": norm_a,
-            "norm_b": norm_b,
-            "disp_a": disp_a,
-            "disp_b": disp_b,
-            "canon": canon,
-        })
+    # ocorrência dentro da chave para preservar repetidos
+    work_a["__OCC__"] = work_a.groupby("__JOIN__").cumcount() + 1
+    work_b["__OCC__"] = work_b.groupby("__JOIN__").cumcount() + 1
 
-    a["__join_key"] = _build_join_key(a, key_cols_a)
-    b["__join_key"] = _build_join_key(b, key_cols_b)
-    a["__dup_a"] = a.groupby("__join_key")["__join_key"].transform("size")
-    b["__dup_b"] = b.groupby("__join_key")["__join_key"].transform("size")
-    a["__occ"] = a.groupby("__join_key").cumcount() + 1
-    b["__occ"] = b.groupby("__join_key").cumcount() + 1
+    a_dups = work_a.groupby("__JOIN__").size().reset_index(name="QTD_BASE1")
+    b_dups = work_b.groupby("__JOIN__").size().reset_index(name="QTD_BASE2")
+    dup_view = a_dups.merge(b_dups, on="__JOIN__", how="outer").fillna(0)
+    dup_view["QTD_BASE1"] = dup_view["QTD_BASE1"].astype(int)
+    dup_view["QTD_BASE2"] = dup_view["QTD_BASE2"].astype(int)
+    dup_view["DUPLICIDADE"] = np.where((dup_view["QTD_BASE1"] > 1) | (dup_view["QTD_BASE2"] > 1), "Sim", "Não")
 
-    merged = a.merge(
-        b,
-        on=["__join_key", "__occ"],
+    merged = work_a.merge(
+        work_b,
+        on=["__JOIN__", "__OCC__"],
         how="outer",
-        suffixes=(f"__{base1_name}", f"__{base2_name}"),
+        suffixes=("_BASE1", "_BASE2"),
         indicator=True,
     )
 
-    def _mcol(original_col: str, base_name: str) -> str:
-        cand1 = f"{original_col}__{base_name}"
-        if cand1 in merged.columns:
-            return cand1
-        if original_col in merged.columns:
-            return original_col
-        raise KeyError(original_col)
+    # dimensões canônicas visíveis
+    for p in pairs:
+        lbl = p["label"]
+        a_col = p["a_col"]
+        b_col = p["b_col"]
+        col_a = f"{a_col}_BASE1" if f"{a_col}_BASE1" in merged.columns else a_col
+        col_b = f"{b_col}_BASE2" if f"{b_col}_BASE2" in merged.columns else b_col
+        vis = pd.Series([""] * len(merged))
+        if col_a in merged.columns:
+            vis = _force_text_series(merged[col_a])
+        if col_b in merged.columns:
+            vis = vis.where(vis.ne(""), _force_text_series(merged[col_b]))
+        merged[f"DIM_{lbl}"] = vis
 
-    merged["HAS_BASE1"] = merged["__row_a"].notna()
-    merged["HAS_BASE2"] = merged["__row_b"].notna()
-    merged["STATUS_BASE"] = np.select(
+    # metadados de presença e motivo
+    merged["PRESENCA"] = merged["_merge"].map({
+        "both": "Em ambas",
+        "left_only": "Somente Base 1",
+        "right_only": "Somente Base 2",
+    })
+
+    # Valores
+    value_labels = []
+    for vp in value_pairs:
+        lbl = vp["label"]
+        value_labels.append(lbl)
+        a_col = vp["a_val"]
+        b_col = vp["b_val"]
+        col_a = f"{a_col}_BASE1" if f"{a_col}_BASE1" in merged.columns else a_col
+        col_b = f"{b_col}_BASE2" if f"{b_col}_BASE2" in merged.columns else b_col
+        a_num = _to_number(merged[col_a]) if col_a in merged.columns else pd.Series([0] * len(merged))
+        b_num = _to_number(merged[col_b]) if col_b in merged.columns else pd.Series([0] * len(merged))
+        merged[f"BASE1_{lbl}"] = a_num.round(2)
+        merged[f"BASE2_{lbl}"] = b_num.round(2)
+        merged[f"DIF_{lbl}"] = (a_num - b_num).round(2)
+
+    if value_labels:
+        dif_abs = sum(merged[f"DIF_{lbl}"].abs() for lbl in value_labels)
+    else:
+        dif_abs = pd.Series([0] * len(merged))
+
+    merged["MOTIVO"] = np.select(
         [
-            merged["HAS_BASE1"] & merged["HAS_BASE2"],
-            merged["HAS_BASE1"] & ~merged["HAS_BASE2"],
-            ~merged["HAS_BASE1"] & merged["HAS_BASE2"],
+            merged["PRESENCA"].eq("Somente Base 1"),
+            merged["PRESENCA"].eq("Somente Base 2"),
+            dif_abs.gt(0.0001),
         ],
-        ["CASADO", f"SÓ {base1_name}", f"SÓ {base2_name}"],
-        default="INDEFINIDO",
+        [
+            "Somente Base 1",
+            "Somente Base 2",
+            "Divergência de valor",
+        ],
+        default="Conciliado",
     )
-    merged["CHAVE_ANALISE"] = merged["__join_key"]
-    merged["DUP_BASE1"] = merged.get("__dup_a", 0).fillna(0).astype(int) > 1
-    merged["DUP_BASE2"] = merged.get("__dup_b", 0).fillna(0).astype(int) > 1
-    merged["EH_DUPLICIDADE"] = merged["DUP_BASE1"] | merged["DUP_BASE2"]
 
-    canonical_group_options = []
-    for meta in key_meta:
-        a_disp_col = _mcol(meta["disp_a"], base1_name)
-        b_disp_col = _mcol(meta["disp_b"], base2_name)
-        merged[meta["canon"]] = merged[a_disp_col].fillna("")
-        mask_empty = merged[meta["canon"]].eq("")
-        merged.loc[mask_empty, meta["canon"]] = merged.loc[mask_empty, b_disp_col].fillna("")
-        canonical_group_options.append(meta["label"])
+    # incorpora duplicidade
+    merged = merged.merge(dup_view[["__JOIN__", "QTD_BASE1", "QTD_BASE2", "DUPLICIDADE"]], on="__JOIN__", how="left")
+    merged["QTD_BASE1"] = merged["QTD_BASE1"].fillna(0).astype(int)
+    merged["QTD_BASE2"] = merged["QTD_BASE2"].fillna(0).astype(int)
+    merged["DUPLICIDADE"] = merged["DUPLICIDADE"].fillna("Não")
+    merged.loc[merged["DUPLICIDADE"].eq("Sim"), "MOTIVO"] = np.where(
+        merged.loc[merged["DUPLICIDADE"].eq("Sim"), "MOTIVO"].eq("Conciliado"),
+        "Duplicidade",
+        merged.loc[merged["DUPLICIDADE"].eq("Sim"), "MOTIVO"] + " + Duplicidade",
+    )
 
-    for mf in mapped_fields:
-        label = mf["label"]
-        canon = f"DIM__{label}"
-        a_col = _mcol(mf["new_col"], base1_name)
-        merged[canon] = merged[a_col].fillna("")
-        if mf.get("target_col"):
-            try:
-                b_col = _mcol(mf["target_col"], base2_name)
-                mask_empty = merged[canon].eq("")
-                merged.loc[mask_empty, canon] = merged.loc[mask_empty, b_col].fillna("")
-            except KeyError:
-                pass
-        key_meta.append({
-            "label": label,
-            "canon": canon,
-            "col_a": mf["new_col"],
-            "col_b": mf.get("target_col", ""),
+    # subconjuntos úteis
+    only_a = merged[merged["PRESENCA"].eq("Somente Base 1")].copy()
+    only_b = merged[merged["PRESENCA"].eq("Somente Base 2")].copy()
+    dups_only = merged[merged["DUPLICIDADE"].eq("Sim")].copy()
+
+    return merged, only_a, only_b, dups_only
+
+
+def build_executive_summary(full_df: pd.DataFrame,
+                            group_dims: List[str],
+                            value_labels: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    # topo financeiro global
+    top_rows = []
+    for lbl in value_labels:
+        top_rows.append({
+            "Campo": lbl,
+            "Total Base 1": round(full_df[f"BASE1_{lbl}"].sum(), 2),
+            "Total Base 2": round(full_df[f"BASE2_{lbl}"].sum(), 2),
+            "Diferença": round(full_df[f"DIF_{lbl}"].sum(), 2),
         })
-        canonical_group_options.append(label)
+    top_df = pd.DataFrame(top_rows)
 
-    compare_meta = []
-    divergence_cols = []
-    for i, pair in enumerate(compare_pairs, start=1):
-        col_a = pair["base1_col"]
-        col_b = pair["base2_col"]
-        label = pair.get("label") or _suggest_label(col_a, col_b)
-        tol = float(pair.get("tolerance", 0.0) or 0.0)
+    if not group_dims:
+        group_dims = ["MOTIVO"]
 
-        col_a_m = f"VALOR_{base1_name}_{label}"
-        col_b_m = f"VALOR_{base2_name}_{label}"
-        col_dif = f"DIF_{label}"
+    group_cols = [f"DIM_{g}" if not g.startswith("DIM_") else g for g in group_dims]
+    existing_group_cols = [c for c in group_cols if c in full_df.columns]
+    if not existing_group_cols:
+        full_df = full_df.copy()
+        full_df["DIM_Resumo"] = "Resumo Geral"
+        existing_group_cols = ["DIM_Resumo"]
 
-        merged[col_a_m] = _to_number(merged[_mcol(col_a, base1_name)])
-        merged[col_b_m] = _to_number(merged[_mcol(col_b, base2_name)])
-        merged[col_dif] = merged[col_a_m] - merged[col_b_m]
-        div_flag = f"__DIV_{i}"
-        merged[div_flag] = merged["HAS_BASE1"] & merged["HAS_BASE2"] & (merged[col_dif].abs() > tol)
-        divergence_cols.append(div_flag)
-        compare_meta.append({
-            "label": label,
-            "col_a": col_a,
-            "col_b": col_b,
-            "val_a": col_a_m,
-            "val_b": col_b_m,
-            "diff": col_dif,
-            "tol": tol,
-        })
-
-    merged["EH_DIVERGENCIA"] = merged[divergence_cols].any(axis=1) if divergence_cols else False
-    merged["EH_AUSENTE"] = merged["STATUS_BASE"].ne("CASADO")
-
-    def _motivo_row(r):
-        reasons = []
-        if r["DUP_BASE1"]:
-            reasons.append(f"Duplicidade {base1_name}")
-        if r["DUP_BASE2"]:
-            reasons.append(f"Duplicidade {base2_name}")
-        if r["STATUS_BASE"] == f"SÓ {base1_name}":
-            reasons.append(f"Somente {base1_name}")
-        elif r["STATUS_BASE"] == f"SÓ {base2_name}":
-            reasons.append(f"Somente {base2_name}")
-        elif r["EH_DIVERGENCIA"]:
-            labels = [meta["label"] for meta, dc in zip(compare_meta, divergence_cols) if r[dc]]
-            reasons.append("Diferença em " + ", ".join(labels))
-        if not reasons:
-            reasons.append("Coerente")
-        return " | ".join(reasons)
-
-    merged["MOTIVO"] = merged.apply(_motivo_row, axis=1)
-
-    if not executive_group_labels:
-        executive_group_labels = [meta["label"] for meta in key_meta if meta["label"] in canonical_group_options]
-        if not executive_group_labels and canonical_group_options:
-            executive_group_labels = [canonical_group_options[0]]
-    if not executive_value_labels:
-        executive_value_labels = [meta["label"] for meta in compare_meta]
-
-    label_to_canon = {meta["label"]: meta["canon"] for meta in key_meta if "canon" in meta}
-    group_cols = [label_to_canon[l] for l in executive_group_labels if l in label_to_canon]
-    if not group_cols:
-        group_cols = [next(iter(label_to_canon.values()))]
-        executive_group_labels = [next(iter(label_to_canon.keys()))]
-
-    summary_agg = {
-        "HAS_BASE1": "sum",
-        "HAS_BASE2": "sum",
-        "EH_DIVERGENCIA": "sum",
-        "EH_AUSENTE": "sum",
-        "EH_DUPLICIDADE": "sum",
-        "MOTIVO": lambda s: " | ".join([f"{k} ({v})" for k, v in Counter(s).most_common(3)]),
+    agg_spec = {
+        "PRESENCA": "count",
     }
-    rename_cols = {
-        "HAS_BASE1": f"Qtde {base1_name}",
-        "HAS_BASE2": f"Qtde {base2_name}",
-        "EH_DIVERGENCIA": "Qtde Divergências",
-        "EH_AUSENTE": "Qtde Ausentes",
-        "EH_DUPLICIDADE": "Qtde Duplicidades",
-        "MOTIVO": "Motivo",
-    }
-    for meta in compare_meta:
-        if meta["label"] in executive_value_labels:
-            summary_agg[meta["val_a"]] = "sum"
-            summary_agg[meta["val_b"]] = "sum"
-            summary_agg[meta["diff"]] = "sum"
-            rename_cols[meta["val_a"]] = f"{meta['label']} {base1_name}"
-            rename_cols[meta["val_b"]] = f"{meta['label']} {base2_name}"
-            rename_cols[meta["diff"]] = f"Diferença {meta['label']}"
+    for lbl in value_labels:
+        agg_spec[f"BASE1_{lbl}"] = "sum"
+        agg_spec[f"BASE2_{lbl}"] = "sum"
+        agg_spec[f"DIF_{lbl}"] = "sum"
 
-    resumo_exec = merged.groupby(group_cols, dropna=False).agg(summary_agg).reset_index()
-    resumo_exec.rename(columns=rename_cols, inplace=True)
-    label_map_exec = {label_to_canon[k]: k for k in executive_group_labels if k in label_to_canon}
-    resumo_exec.rename(columns=label_map_exec, inplace=True)
-    resumo_exec.insert(len(executive_group_labels), "Qtde Registros", merged.groupby(group_cols, dropna=False).size().values)
-    # manter linhas relevantes primeiro
-    diff_cols_exec = [c for c in resumo_exec.columns if str(c).startswith("Diferença ")]
-    if diff_cols_exec:
-        resumo_exec["__ABS_DIF_TOTAL"] = resumo_exec[diff_cols_exec].abs().sum(axis=1)
-        resumo_exec = resumo_exec.sort_values(["__ABS_DIF_TOTAL", "Qtde Ausentes", "Qtde Duplicidades"], ascending=[False, False, False]).drop(columns=["__ABS_DIF_TOTAL"])
+    summary = full_df.groupby(existing_group_cols, dropna=False).agg(agg_spec).reset_index()
+    summary = summary.rename(columns={"PRESENCA": "Qtde Registros"})
 
-    bridge_rows = []
-    kpis = []
-    for meta in compare_meta:
-        if meta["label"] not in executive_value_labels:
-            continue
-        total_a = float(merged[meta["val_a"]].sum())
-        total_b = float(merged[meta["val_b"]].sum())
-        diff_total = total_a - total_b
-        matched_diff = float(merged.loc[merged["STATUS_BASE"].eq("CASADO"), meta["diff"]].sum())
-        only_a = float(merged.loc[merged["STATUS_BASE"].eq(f"SÓ {base1_name}"), meta["val_a"]].sum())
-        only_b = -float(merged.loc[merged["STATUS_BASE"].eq(f"SÓ {base2_name}"), meta["val_b"]].sum())
-        bridge_rows.extend([
-            {"Campo": meta["label"], "Componente": f"{base1_name} total", "Valor": total_a},
-            {"Campo": meta["label"], "Componente": f"{base2_name} total", "Valor": total_b},
-            {"Campo": meta["label"], "Componente": "Diferença em registros casados", "Valor": matched_diff},
-            {"Campo": meta["label"], "Componente": f"Somente {base1_name}", "Valor": only_a},
-            {"Campo": meta["label"], "Componente": f"Somente {base2_name}", "Valor": only_b},
-            {"Campo": meta["label"], "Componente": "Diferença total", "Valor": diff_total},
-        ])
-        kpis.append({
-            "Campo": meta["label"],
-            f"Total {base1_name}": total_a,
-            f"Total {base2_name}": total_b,
-            "Diferença total": diff_total,
-        })
+    # indicadores por motivo
+    flags = pd.DataFrame(index=full_df.index)
+    flags["Qtde Divergências"] = full_df["MOTIVO"].str.contains("Divergência", na=False).astype(int)
+    flags["Qtde só Base 1"] = full_df["PRESENCA"].eq("Somente Base 1").astype(int)
+    flags["Qtde só Base 2"] = full_df["PRESENCA"].eq("Somente Base 2").astype(int)
+    flags["Qtde Duplicidades"] = full_df["DUPLICIDADE"].eq("Sim").astype(int)
+    tmp = pd.concat([full_df[existing_group_cols], flags], axis=1)
+    sums = tmp.groupby(existing_group_cols, dropna=False).sum().reset_index()
+    summary = summary.merge(sums, on=existing_group_cols, how="left")
 
-    bridge_df = pd.DataFrame(bridge_rows)
-    kpis_df = pd.DataFrame(kpis)
+    # nomes mais amigáveis para agrupadores
+    rename_map = {c: c.replace("DIM_", "") for c in existing_group_cols}
+    summary = summary.rename(columns=rename_map)
 
-    resumo_geral = {
-        "Tipo de análise": "Confronto completo de bases",
-        "Modo": "Auditoria completa sem hierarquia entre bases",
-        "Registros analisados": int(max(len(df_a), len(df_b))),
-        "Correspondências": int((merged["STATUS_BASE"] == "CASADO").sum()),
-        f"Somente {base1_name}": int((merged["STATUS_BASE"] == f"SÓ {base1_name}").sum()),
-        f"Somente {base2_name}": int((merged["STATUS_BASE"] == f"SÓ {base2_name}").sum()),
-        "Duplicidades": int(merged["EH_DUPLICIDADE"].sum()),
-        "Divergências": int(merged["EH_DIVERGENCIA"].sum()),
-        "Aderência (%)": round(float((~merged["EH_DIVERGENCIA"] & ~merged["EH_AUSENTE"]).sum()) / max(len(merged), 1) * 100, 2),
-    }
+    # ordena pelo maior impacto
+    if value_labels:
+        sort_cols = [f"DIF_{value_labels[0]}"]
+        summary = summary.assign(__ABS__=summary[sort_cols[0]].abs()).sort_values("__ABS__", ascending=False).drop(columns=["__ABS__"])
 
-    detailed = merged.copy()
-    for meta in key_meta:
-        if meta.get("col_a"):
-            try:
-                detailed[f"{base1_name}_{meta['label']}"] = detailed[_mcol(meta['col_a'], base1_name)]
-            except KeyError:
-                pass
-        if meta.get("col_b"):
-            try:
-                detailed[f"{base2_name}_{meta['label']}"] = detailed[_mcol(meta['col_b'], base2_name)]
-            except KeyError:
-                pass
-
-    final_cols = []
-    for meta in key_meta:
-        a_name = f"{base1_name}_{meta['label']}"
-        b_name = f"{base2_name}_{meta['label']}"
-        if a_name in detailed.columns:
-            final_cols.append(a_name)
-        if b_name in detailed.columns:
-            final_cols.append(b_name)
-    for meta in compare_meta:
-        final_cols.extend([meta["val_a"], meta["val_b"], meta["diff"]])
-    final_cols += ["STATUS_BASE", "EH_DIVERGENCIA", "EH_AUSENTE", "EH_DUPLICIDADE", "MOTIVO", "CHAVE_ANALISE"]
-    final_cols = [c for c in final_cols if c in detailed.columns]
-    df_result = detailed[final_cols].copy()
-
-    divergencias = df_result[df_result["EH_DIVERGENCIA"] | df_result["EH_AUSENTE"] | df_result["EH_DUPLICIDADE"]].copy()
-    nao_encontrados = df_result[df_result["STATUS_BASE"].ne("CASADO")].copy()
-    duplicidades = df_result[df_result["EH_DUPLICIDADE"]].copy()
-
-    return {
-        "df_result": df_result,
-        "resumo_exec": resumo_exec,
-        "bridge_df": bridge_df,
-        "kpis_df": kpis_df,
-        "resumo_geral": resumo_geral,
-        "divergencias": divergencias,
-        "nao_encontrados": nao_encontrados,
-        "duplicidades": duplicidades,
-        "group_options": canonical_group_options,
-        "value_options": [m["label"] for m in compare_meta],
-        "mapped_fields": mapped_fields,
-    }
+    return top_df, summary
 
 
 # =========================================================
-# Excel
+# Exportação Excel
 # =========================================================
 
-def _autofit_columns(ws, df: pd.DataFrame):
-    for i, col in enumerate(df.columns):
-        max_len = max(len(str(col)), *(len(str(v)) for v in df[col].head(500).fillna("")))
-        ws.set_column(i, i, min(max_len + 2, 28))
-
-
-def _write_table_sheet(writer, name: str, df: pd.DataFrame, money_like: List[str] = None, int_like: List[str] = None):
-    money_like = set(money_like or [])
-    int_like = set(int_like or [])
-    df2 = df.copy()
-    df2.to_excel(writer, sheet_name=name, index=False, startrow=0)
+def _autofit_and_format(writer, df: pd.DataFrame, sheet_name: str):
     wb = writer.book
-    ws = writer.sheets[name]
-    fmt_money = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'})
-    fmt_int = wb.add_format({"num_format": '0'})
-    fmt_hdr = wb.add_format({"bold": True, "bg_color": '#DCE6F1', "border": 1})
-    fmt_text = wb.add_format({"border": 1})
+    ws = writer.sheets[sheet_name]
 
-    for c, col in enumerate(df2.columns):
-        ws.write(0, c, col, fmt_hdr)
-        if col in money_like:
-            ws.set_column(c, c, 16, fmt_money)
-        elif col in int_like:
-            ws.set_column(c, c, 14, fmt_int)
+    fmt_header = wb.add_format({"bold": True, "bg_color": "#D9EAF7", "border": 1})
+    fmt_text = wb.add_format({"border": 1})
+    fmt_money = wb.add_format({"border": 1, "num_format": 'R$ #,##0.00'})
+    fmt_int = wb.add_format({"border": 1, "num_format": '0'})
+
+    for c_idx, col in enumerate(df.columns):
+        ws.write(0, c_idx, col, fmt_header)
+        ser = df[col]
+        width = max(len(str(col)), min(60, ser.astype(str).map(len).max() if len(ser) else 10)) + 2
+        moneyish = any(k in col.upper() for k in ["BASE 1", "BASE 2", "DIF", "SALDO", "AQUISI", "DEPRECIA"])
+        qtyish = col.upper().startswith("QTDE") or col.upper().startswith("QTD")
+        if qtyish:
+            ws.set_column(c_idx, c_idx, width, fmt_int)
+        elif moneyish and pd.api.types.is_numeric_dtype(ser):
+            ws.set_column(c_idx, c_idx, width, fmt_money)
         else:
-            ws.set_column(c, c, min(max(len(str(col)) + 2, 14), 32), fmt_text)
-    ws.autofilter(0, 0, max(len(df2), 1), max(len(df2.columns) - 1, 0))
+            ws.set_column(c_idx, c_idx, width, fmt_text)
+
+    ws.autofilter(0, 0, len(df), max(0, len(df.columns) - 1))
     ws.freeze_panes(1, 0)
 
-    if len(df2) > 0:
-        total_row = len(df2) + 2
-        ws.write(total_row, 0, "TOTAL FILTRADO", wb.add_format({"bold": True, "bg_color": '#FFF2CC'}))
-        for c, col in enumerate(df2.columns):
-            if col in money_like or col in int_like:
-                col_letter = chr(65 + c) if c < 26 else None
-                if col_letter:
-                    formula = f'=SUBTOTAL(109,{col_letter}2:{col_letter}{len(df2)+1})'
-                    ws.write_formula(total_row, c, formula, fmt_money if col in money_like else fmt_int)
 
+def export_excel(full_df: pd.DataFrame,
+                 only_a: pd.DataFrame,
+                 only_b: pd.DataFrame,
+                 dups: pd.DataFrame,
+                 top_exec: pd.DataFrame,
+                 summary_exec: pd.DataFrame,
+                 base1_name: str,
+                 base2_name: str) -> bytes:
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        top_exec.to_excel(writer, index=False, sheet_name="RESUMO_EXECUTIVO")
+        summary_exec.to_excel(writer, index=False, sheet_name="RESUMO_POR_CHAVE", startrow=len(top_exec) + 3)
+        full_df.to_excel(writer, index=False, sheet_name="RESULTADO_COMPLETO")
+        only_a.to_excel(writer, index=False, sheet_name=_safe_sheet_name(f"SOMENTE_{base1_name}"))
+        only_b.to_excel(writer, index=False, sheet_name=_safe_sheet_name(f"SOMENTE_{base2_name}"))
+        dups.to_excel(writer, index=False, sheet_name="DUPLICIDADES")
 
-def to_excel_package(result: dict, base1_name: str, base2_name: str) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        wb = writer.book
-        fmt_title = wb.add_format({"bold": True, "font_size": 14})
-        fmt_sec = wb.add_format({"bold": True, "bg_color": '#DCE6F1', 'border': 1})
-        fmt_money = wb.add_format({"num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'})
-        fmt_text = wb.add_format({"border": 1})
-        fmt_int = wb.add_format({"num_format": '0'})
+        _autofit_and_format(writer, top_exec, "RESUMO_EXECUTIVO")
+        _autofit_and_format(writer, summary_exec, "RESUMO_POR_CHAVE")
+        _autofit_and_format(writer, full_df, "RESULTADO_COMPLETO")
+        _autofit_and_format(writer, only_a, _safe_sheet_name(f"SOMENTE_{base1_name}"))
+        _autofit_and_format(writer, only_b, _safe_sheet_name(f"SOMENTE_{base2_name}"))
+        _autofit_and_format(writer, dups, "DUPLICIDADES")
 
-        ws = wb.add_worksheet("RESUMO_EXECUTIVO")
-        writer.sheets["RESUMO_EXECUTIVO"] = ws
-        ws.write(0, 0, "Resumo Executivo", fmt_title)
-
-        resumo_df = pd.DataFrame({"Indicador": list(result["resumo_geral"].keys()), "Valor": list(result["resumo_geral"].values())})
-        resumo_df.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False, startrow=2, startcol=0)
-        for c, col in enumerate(resumo_df.columns):
-            ws.write(2, c, col, fmt_sec)
-            ws.set_column(c, c, 24 if c == 0 else 22, fmt_text)
-
-        kpi_df = result["kpis_df"].copy()
-        if not kpi_df.empty:
-            start = 2
-            col0 = 4
-            ws.write(start - 1, col0, "Impacto financeiro total", fmt_title)
-            kpi_df.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False, startrow=start, startcol=col0)
-            for c, col in enumerate(kpi_df.columns):
-                ws.write(start, col0 + c, col, fmt_sec)
-                ws.set_column(col0 + c, col0 + c, 20, fmt_money if col != "Campo" else fmt_text)
-
-        bridge_df = result["bridge_df"].copy()
-        if not bridge_df.empty:
-            start = 2 + max(len(resumo_df), len(kpi_df) + 2) + 4
-            ws.write(start - 1, 0, "Ponte de conciliação", fmt_title)
-            bridge_df.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False, startrow=start, startcol=0)
-            for c, col in enumerate(bridge_df.columns):
-                ws.write(start, c, col, fmt_sec)
-                ws.set_column(c, c, 26 if col != "Valor" else 18, fmt_money if col == "Valor" else fmt_text)
-
-        resumo_exec = result["resumo_exec"].copy()
-        if not resumo_exec.empty:
-            start = max(18, 2 + max(len(resumo_df), len(kpi_df) + 2) + len(bridge_df) + 8)
-            ws.write(start - 1, 0, "Resumo executivo por chave", fmt_title)
-            resumo_exec.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False, startrow=start, startcol=0)
-            money_cols = [c for c in resumo_exec.columns if c.startswith(f"{base1_name}") or c.startswith(f"{base2_name}") or c.startswith("Diferença ")]
-            int_cols = [c for c in resumo_exec.columns if c.startswith("Qtde")]
-            for c, col in enumerate(resumo_exec.columns):
-                ws.write(start, c, col, fmt_sec)
-                fmt = fmt_money if col in money_cols else (fmt_int if col in int_cols else fmt_text)
-                ws.set_column(c, c, min(max(len(str(col)) + 2, 14), 28), fmt)
-            ws.autofilter(start, 0, start + len(resumo_exec), max(len(resumo_exec.columns)-1, 0))
-            ws.freeze_panes(start + 1, 0)
-            total_row = start + len(resumo_exec) + 2
-            ws.write(total_row, 0, "TOTAL FILTRADO", wb.add_format({"bold": True, "bg_color": '#FFF2CC'}))
-            for c, col in enumerate(resumo_exec.columns):
-                if col in money_cols or col in int_cols:
-                    col_letter = chr(65 + c) if c < 26 else None
-                    if col_letter:
-                        formula = f'=SUBTOTAL(109,{col_letter}{start+2}:{col_letter}{start+len(resumo_exec)+1})'
-                        ws.write_formula(total_row, c, formula, fmt_money if col in money_cols else fmt_int)
-
-        # abas detalhadas
-        money_cols_result = [c for c in result["df_result"].columns if c.startswith(f"VALOR_{base1_name}") or c.startswith(f"VALOR_{base2_name}") or c.startswith("DIF_")]
-        int_cols_result = []
-        _write_table_sheet(writer, "RESULTADO_COMPLETO", result["df_result"], money_like=money_cols_result, int_like=int_cols_result)
-        _write_table_sheet(writer, "DIVERGENCIAS", result["divergencias"], money_like=money_cols_result)
-        _write_table_sheet(writer, "NAO_ENCONTRADOS", result["nao_encontrados"], money_like=money_cols_result)
-        _write_table_sheet(writer, "DUPLICIDADES", result["duplicidades"], money_like=money_cols_result)
-
-    output.seek(0)
-    return output.getvalue()
+    return out.getvalue()
 
 
 # =========================================================
-# Estado
+# Estado inicial
 # =========================================================
-if "v20_rules" not in st.session_state:
-    st.session_state.v20_rules = []
-if "v20_key_pairs" not in st.session_state:
-    st.session_state.v20_key_pairs = []
-if "v20_compare_pairs" not in st.session_state:
-    st.session_state.v20_compare_pairs = []
-if "v20_analysis" not in st.session_state:
-    st.session_state.v20_analysis = None
-if "v20_rule_editor_df" not in st.session_state:
-    st.session_state.v20_rule_editor_df = pd.DataFrame()
-if "v20_builder_loaded" not in st.session_state:
-    st.session_state.v20_builder_loaded = False
+
+def init_state():
+    defaults = {
+        "v22_rules": [],
+        "v22_current_mapping": {},
+        "v22_loaded_rule_preview": [],
+        "v22_created_mapped": [],
+        "v22_pair_rows": [{"a_col": "", "b_col": "", "label": ""}],
+        "v22_value_rows": [{"a_val": "", "b_val": "", "label": ""}],
+        "v22_base1_name": "Base 1",
+        "v22_base2_name": "Base 2",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
 # =========================================================
 # Interface
 # =========================================================
-st.title("Match Inteligente V20")
-st.caption("Confronto completo entre duas bases, sem hierarquia entre Base 1 e Base 2, usando chave da análise, regras de equivalência e fechamento financeiro consistente.")
 
-col_a, col_b = st.columns(2)
-with col_a:
-    base1_name = st.text_input("Nome exibido da Base 1", value="RM")
-    file_a = st.file_uploader("Upload Base 1 (.xlsx ou .csv)", type=["xlsx", "csv"], key="v20_file_a")
-with col_b:
-    base2_name = st.text_input("Nome exibido da Base 2", value="Protheus")
-    file_b = st.file_uploader("Upload Base 2 (.xlsx ou .csv)", type=["xlsx", "csv"], key="v20_file_b")
+def main():
+    init_state()
+    st.title("Match Inteligente V22")
+    st.caption("Motor genérico de confronto entre duas bases, com regra de equivalência, resumo executivo e resultado auditável.")
 
-if not (file_a and file_b):
-    st.info("Envie as duas bases para configurar a auditoria.")
-    st.stop()
+    # --- Entrada de bases
+    st.subheader("1) Carregar bases")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.session_state["v22_base1_name"] = st.text_input("Nome da Base 1", value=st.session_state["v22_base1_name"])
+        up_a = st.file_uploader("Arquivo da Base 1", type=["xlsx", "xls", "csv"], key="v22_up_a")
+    with c2:
+        st.session_state["v22_base2_name"] = st.text_input("Nome da Base 2", value=st.session_state["v22_base2_name"])
+        up_b = st.file_uploader("Arquivo da Base 2", type=["xlsx", "xls", "csv"], key="v22_up_b")
 
-try:
-    df_a = read_any_table(file_a)
-    df_b = read_any_table(file_b)
-except Exception as e:
-    st.error(f"Erro ao ler os arquivos: {e}")
-    st.stop()
+    if not up_a or not up_b:
+        st.info("Carregue as duas bases para continuar.")
+        return
 
-st.success(f"Base 1: {len(df_a):,} linhas | Base 2: {len(df_b):,} linhas".replace(",", "."))
+    df_a = read_any_table(up_a)
+    df_b = read_any_table(up_b)
+    cols_a = list(df_a.columns)
+    cols_b = list(df_b.columns)
 
-# =========================================================
-# Regras de equivalência
-# =========================================================
-st.markdown("## 1) Regras opcionais de equivalência")
-st.caption("Use quando precisar transformar um valor da Base 1 em um valor equivalente da Base 2 antes do match principal.")
+    st.success(f"Base 1: {len(df_a):,} linhas | Base 2: {len(df_b):,} linhas".replace(",", "."))
 
-imp_a, imp_b = st.columns([1.5, 1])
-with imp_a:
-    imported_rule = st.file_uploader("Importar regra (.json ou .csv)", type=["json", "csv"], key="v20_rule_upload")
-with imp_b:
-    if st.button("Aplicar regra importada", use_container_width=True):
-        try:
-            imported = _parse_imported_rule(imported_rule)
-            default_source = st.session_state.get("v20_rule_source", df_a.columns[0] if len(df_a.columns) else "")
-            default_target = st.session_state.get("v20_rule_target", df_b.columns[0] if len(df_b.columns) else "")
-            for r in imported:
-                if not r.get("source_col"):
-                    r["source_col"] = default_source
-                if not r.get("target_col"):
-                    r["target_col"] = default_target
-            st.session_state.v20_rules = imported
-            st.success(f"Regra importada com {sum(len(r.get('mapping', {})) for r in imported)} associações.")
-        except Exception as e:
-            st.error(str(e))
+    # --- Regras de equivalência
+    st.subheader("2) Regras opcionais de equivalência / de-para")
+    st.caption("Use quando um campo da Base 1 precisa ser traduzido para corresponder a um campo da Base 2.")
 
-src_col, tgt_col = st.columns(2)
-with src_col:
-    source_rule_col = st.selectbox("Campo da Base 1 para equivalência", options=df_a.columns.tolist(), key="v20_rule_source")
-with tgt_col:
-    target_rule_col = st.selectbox("Campo da Base 2 de destino", options=df_b.columns.tolist(), key="v20_rule_target")
+    rc1, rc2, rc3 = st.columns([1.3, 1.3, 1])
+    with rc1:
+        rule_source = st.selectbox("Campo original da Base 1", options=[""] + cols_a, key="v22_rule_source")
+    with rc2:
+        rule_target = st.selectbox("Campo correspondente da Base 2", options=[""] + cols_b, key="v22_rule_target")
+    with rc3:
+        load_assoc = st.button("Carregar associação")
 
-btn1, btn2 = st.columns([1, 2])
-with btn1:
-    if st.button("Carregar associação", use_container_width=True):
-        source_values = sorted([v for v in _force_text_series(df_a[source_rule_col]).drop_duplicates().tolist() if v != ""])
-        target_values = sorted([v for v in _force_text_series(df_b[target_rule_col]).drop_duplicates().tolist() if v != ""])
-        existing = {}
-        for r in st.session_state.v20_rules:
-            if r.get("source_col") == source_rule_col and r.get("target_col") == target_rule_col:
-                existing = r.get("mapping", {})
-                break
-        st.session_state.v20_rule_editor_df = pd.DataFrame({
-            "USAR": [True if v in existing else False for v in source_values],
-            "VALOR_BASE1": source_values,
-            "VALOR_BASE2": [existing.get(v, "") for v in source_values],
-        })
-        st.session_state.v20_rule_target_options = target_values
-        st.session_state.v20_builder_loaded = True
-with btn2:
-    if st.button("Limpar regras", use_container_width=True):
-        st.session_state.v20_rules = []
-        st.session_state.v20_builder_loaded = False
-        st.session_state.v20_rule_editor_df = pd.DataFrame()
-
-if st.session_state.v20_builder_loaded and not st.session_state.v20_rule_editor_df.empty:
-    edited = st.data_editor(
-        st.session_state.v20_rule_editor_df,
-        use_container_width=True,
-        hide_index=True,
-        key="v20_rule_editor",
-        column_config={
-            "USAR": st.column_config.CheckboxColumn("Usar"),
-            "VALOR_BASE1": st.column_config.TextColumn(f"{base1_name}", disabled=True),
-            "VALOR_BASE2": st.column_config.SelectboxColumn(f"{base2_name}", options=st.session_state.get("v20_rule_target_options", [])),
-        },
-    )
-    if st.button("Confirmar regra atual", use_container_width=True):
-        mapping = {}
-        for _, r in edited.iterrows():
-            if bool(r["USAR"]) and _norm_text(r["VALOR_BASE2"]):
-                mapping[_norm_text(r["VALOR_BASE1"])] = _norm_text(r["VALOR_BASE2"])
-        if not mapping:
-            st.warning("Selecione ao menos uma associação com valor de destino.")
+    if load_assoc:
+        if not rule_source:
+            st.warning("Selecione o campo original da Base 1.")
         else:
-            # remove regra antiga do mesmo par
-            st.session_state.v20_rules = [
-                r for r in st.session_state.v20_rules
-                if not (r.get("source_col") == source_rule_col and r.get("target_col") == target_rule_col)
-            ]
-            st.session_state.v20_rules.append({
-                "source_col": source_rule_col,
-                "target_col": target_rule_col,
-                "mapping": mapping,
-            })
-            st.success(f"Regra salva com {len(mapping)} associações.")
+            vals = sorted([v for v in _force_text_series(df_a[rule_source]).unique().tolist() if _norm_text(v) != ""])
+            st.session_state["v22_current_mapping"] = {v: "" for v in vals}
 
-if st.session_state.v20_rules:
-    st.markdown("**Regras confirmadas**")
-    for i, rule in enumerate(st.session_state.v20_rules, start=1):
-        st.write(f"{i}. {rule.get('source_col') or '[importado]'} → {rule.get('target_col') or '[destino]'} | {len(rule.get('mapping', {}))} associações")
-    json_bytes, csv_bytes = _export_rules_payload(st.session_state.v20_rules)
-    d1, d2 = st.columns(2)
-    with d1:
-        st.download_button("Baixar regra (.json)", data=json_bytes, file_name="regra_equivalencia.json", mime="application/json", use_container_width=True)
-    with d2:
-        st.download_button("Baixar regra (.csv)", data=csv_bytes, file_name="regra_equivalencia.csv", mime="text/csv", use_container_width=True)
+    # importar regra
+    import_file = st.file_uploader("Importar regra (.json ou .csv)", type=["json", "csv"], key="v22_rule_import")
+    if import_file is not None:
+        try:
+            parsed = _parse_imported_rule(import_file)
+            st.session_state["v22_loaded_rule_preview"] = parsed
+            st.success(f"Regra importada com {len(parsed)} bloco(s).")
+        except Exception as e:
+            st.error(f"Falha ao importar regra: {e}")
 
-# =========================================================
-# Campos identificadores
-# =========================================================
-st.markdown("## 2) Campos que identificam o mesmo registro nas duas bases")
-st.caption("Monte a chave da análise. Ela pode ser simples ou composta. O sistema vai confrontar usando a combinação exata escolhida.")
+    if st.session_state.get("v22_loaded_rule_preview"):
+        if st.button("Aplicar regra importada"):
+            for rule in st.session_state["v22_loaded_rule_preview"]:
+                st.session_state["v22_rules"].append(rule)
+            st.success("Regra importada aplicada.")
+            st.session_state["v22_loaded_rule_preview"] = []
 
-colk1, colk2, colk3 = st.columns([1, 1, 0.6])
-# opções com mapped fields
-mapped_preview_df, mapped_preview = apply_rules_to_base1(df_a, st.session_state.v20_rules)
-map_name_by_col = {m["new_col"]: m["label"] for m in mapped_preview}
-base1_key_options = mapped_preview_df.columns.tolist()
-rule_hint = None
-with colk1:
-    key_a_sel = st.selectbox(f"Campo da {base1_name}", options=base1_key_options, key="v20_key_a")
-with colk2:
-    # se o campo da base1 for um mapeado, sugerir automaticamente o destino da regra
-    suggested_b = None
-    if key_a_sel in map_name_by_col:
-        for rr in st.session_state.v20_rules:
-            if rr.get("source_col") and rr.get("target_col") and f"[MAP] {rr['source_col']} -> {rr['target_col']}" == map_name_by_col[key_a_sel]:
-                suggested_b = rr.get("target_col")
-                rule_hint = f"Usando campo derivado da regra: {map_name_by_col[key_a_sel]}"
-                break
-    b_opts = df_b.columns.tolist()
-    key_b_index = b_opts.index(suggested_b) if suggested_b in b_opts else 0
-    key_b_sel = st.selectbox(f"Campo da {base2_name}", options=b_opts, index=key_b_index, key="v20_key_b")
-with colk3:
-    default_label = map_name_by_col.get(key_a_sel) or _suggest_label(key_a_sel, key_b_sel)
-    key_label = st.text_input("Nome da dimensão", value=default_label, key="v20_key_label")
-if rule_hint:
-    st.caption(rule_hint)
+    current_map = st.session_state.get("v22_current_mapping", {})
+    if current_map:
+        st.markdown("**Montagem da associação atual**")
+        dest_options = [""] + cols_b
+        default_target_index = dest_options.index(rule_target) if rule_target in dest_options else 0
 
-if st.button("Adicionar par-chave"):
-    pair = {"base1_col": key_a_sel, "base2_col": key_b_sel, "label": _norm_text(key_label) or default_label}
-    if pair not in st.session_state.v20_key_pairs:
-        st.session_state.v20_key_pairs.append(pair)
+        edited_mapping = {}
+        for i, src_val in enumerate(list(current_map.keys())):
+            cc1, cc2, cc3 = st.columns([1.5, 1.2, 0.3])
+            with cc1:
+                st.text_input(f"Base 1 #{i+1}", value=src_val, disabled=True, key=f"v22_src_{i}")
+            with cc2:
+                edited_mapping[src_val] = st.selectbox(
+                    f"Base 2 #{i+1}",
+                    options=dest_options,
+                    index=dest_options.index(current_map.get(src_val, "")) if current_map.get(src_val, "") in dest_options else default_target_index,
+                    key=f"v22_tgt_{i}",
+                )
+            with cc3:
+                pass
 
-if st.session_state.v20_key_pairs:
-    for i, pair in enumerate(st.session_state.v20_key_pairs):
-        c1, c2 = st.columns([6, 1])
-        with c1:
-            st.write(f"**{pair['label']}**: {pair['base1_col']} ↔ {pair['base2_col']}")
-        with c2:
-            if st.button("Remover", key=f"rm_key_{i}"):
-                st.session_state.v20_key_pairs.pop(i)
-                st.rerun()
+        st.session_state["v22_current_mapping"] = edited_mapping
+        ac1, ac2, ac3 = st.columns([1, 1, 2])
+        with ac1:
+            if st.button("Confirmar regra atual"):
+                clean_map = {k: v for k, v in edited_mapping.items() if _norm_text(v) != ""}
+                if not clean_map:
+                    st.warning("Nenhuma associação preenchida para confirmar.")
+                else:
+                    st.session_state["v22_rules"].append({
+                        "source_col": rule_source,
+                        "target_col": rule_target,
+                        "mapping": clean_map,
+                    })
+                    st.session_state["v22_current_mapping"] = {}
+                    st.success("Regra adicionada.")
+        with ac2:
+            if st.button("Cancelar regra atual"):
+                st.session_state["v22_current_mapping"] = {}
 
-# =========================================================
-# Campos de valor
-# =========================================================
-st.markdown("## 3) Campos de valor para confronto")
-st.caption("Aqui entram os valores que o sistema vai comparar e totalizar no resumo executivo.")
+    if st.session_state["v22_rules"]:
+        st.markdown("**Regras confirmadas**")
+        for idx, r in enumerate(st.session_state["v22_rules"]):
+            st.write(f"{idx+1}. {r.get('source_col','(livre)')} -> {r.get('target_col','(livre)')} | {len(r.get('mapping',{}))} associação(ões)")
+        jbytes, cbytes = _export_rules_payload(st.session_state["v22_rules"])
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            st.download_button("Baixar regra em JSON", data=jbytes, file_name="regra_equivalencia.json", mime="application/json")
+        with dc2:
+            st.download_button("Baixar regra em CSV", data=cbytes, file_name="regra_equivalencia.csv", mime="text/csv")
 
-colv1, colv2, colv3, colv4 = st.columns([1, 1, 0.8, 0.6])
-with colv1:
-    cmp_a_sel = st.selectbox(f"Valor da {base1_name}", options=df_a.columns.tolist(), key="v20_cmp_a")
-with colv2:
-    cmp_b_sel = st.selectbox(f"Valor da {base2_name}", options=df_b.columns.tolist(), key="v20_cmp_b")
-with colv3:
-    cmp_label = st.text_input("Nome do confronto", value=_suggest_label(cmp_a_sel, cmp_b_sel), key="v20_cmp_label")
-with colv4:
-    cmp_tol = st.number_input("Tolerância", min_value=0.0, value=0.0, step=0.01, key="v20_cmp_tol")
+    # aplica regras na Base 1
+    df_a_mapped, mapped_info = apply_rules_to_base1(df_a, st.session_state["v22_rules"])
+    opts_a, _ = build_pair_key_options(cols_a, cols_b, mapped_info)
 
-if st.button("Adicionar confronto de valor"):
-    pair = {"base1_col": cmp_a_sel, "base2_col": cmp_b_sel, "label": _norm_text(cmp_label) or _suggest_label(cmp_a_sel, cmp_b_sel), "tolerance": cmp_tol}
-    if pair not in st.session_state.v20_compare_pairs:
-        st.session_state.v20_compare_pairs.append(pair)
+    # --- Campos identificadores
+    st.subheader("3) Campos que identificam o mesmo registro nas duas bases")
+    st.caption("Monte a chave lógica da análise. Pode ser simples ou composta.")
 
-if st.session_state.v20_compare_pairs:
-    for i, pair in enumerate(st.session_state.v20_compare_pairs):
-        c1, c2 = st.columns([6, 1])
-        with c1:
-            st.write(f"**{pair['label']}**: {pair['base1_col']} ↔ {pair['base2_col']} | tolerância {pair.get('tolerance', 0)}")
-        with c2:
-            if st.button("Remover", key=f"rm_cmp_{i}"):
-                st.session_state.v20_compare_pairs.pop(i)
-                st.rerun()
+    pair_rows = st.session_state["v22_pair_rows"]
+    for i, row in enumerate(pair_rows):
+        cpa, cpb, cpl = st.columns([1.2, 1.2, 1])
+        with cpa:
+            a_choice = st.selectbox(
+                f"Base 1 #{i+1}",
+                options=[""] + opts_a,
+                index=([""] + opts_a).index(row.get("a_col", "")) if row.get("a_col", "") in ([""] + opts_a) else 0,
+                key=f"v22_pair_a_{i}",
+            )
+        with cpb:
+            b_options = [""] + cols_b
+            # se Base1 for [MAP], sugerir alvo da regra mas sem prender o usuário
+            suggested = row.get("b_col", "")
+            if a_choice.startswith("[MAP]"):
+                hit = next((m for m in mapped_info if m["mapped_col"] == a_choice), None)
+                if hit and not suggested:
+                    suggested = hit.get("target_col", "")
+            b_choice = st.selectbox(
+                f"Base 2 #{i+1}",
+                options=b_options,
+                index=b_options.index(suggested) if suggested in b_options else 0,
+                key=f"v22_pair_b_{i}",
+            )
+        with cpl:
+            default_label = row.get("label", "") or (_suggest_label(a_choice, b_choice) if a_choice or b_choice else "")
+            label = st.text_input(f"Nome da dimensão #{i+1}", value=default_label, key=f"v22_pair_lbl_{i}")
 
-# Diagnóstico da chave
-if st.session_state.v20_key_pairs:
-    tmp_a, _ = apply_rules_to_base1(df_a, st.session_state.v20_rules)
-    key_cols_tmp_a = [p['base1_col'] for p in st.session_state.v20_key_pairs]
-    key_cols_tmp_b = [p['base2_col'] for p in st.session_state.v20_key_pairs]
-    key_a = _build_join_key(tmp_a, key_cols_tmp_a)
-    key_b = _build_join_key(df_b, key_cols_tmp_b)
-    d1, d2 = st.columns(2)
-    with d1:
-        st.info(f"{base1_name}: {key_a.nunique():,} chaves distintas | {(key_a.duplicated(keep=False)).sum():,} linhas com repetição de chave".replace(',', '.'))
-    with d2:
-        st.info(f"{base2_name}: {key_b.nunique():,} chaves distintas | {(key_b.duplicated(keep=False)).sum():,} linhas com repetição de chave".replace(',', '.'))
+        pair_rows[i] = {"a_col": a_choice, "b_col": b_choice, "label": label}
 
-# =========================================================
-# Saída
-# =========================================================
-st.markdown("## 4) Como deseja receber o resultado?")
-only_div = st.checkbox("Mostrar apenas divergências no resultado")
-include_not_found = st.checkbox("Incluir não encontrados", value=True)
-make_summary = st.checkbox("Gerar resumo executivo", value=True)
+    p1, p2 = st.columns([1, 4])
+    with p1:
+        if st.button("Adicionar campo identificador"):
+            pair_rows.append({"a_col": "", "b_col": "", "label": ""})
+    st.session_state["v22_pair_rows"] = pair_rows
 
-# opções de resumo - robustas
-mapped_labels = [f"[MAP] {r['source_col']} -> {r['target_col']}" for r in st.session_state.v20_rules if r.get('source_col')]
-default_group = [p['label'] for p in st.session_state.v20_key_pairs]
-default_values = [p['label'] for p in st.session_state.v20_compare_pairs]
+    # --- Campos de valor
+    st.subheader("4) Quais campos deseja confrontar para validar valores")
+    value_rows = st.session_state["v22_value_rows"]
+    for i, row in enumerate(value_rows):
+        cva, cvb, cvl = st.columns([1.2, 1.2, 1])
+        with cva:
+            a_choice = st.selectbox(
+                f"Valor Base 1 #{i+1}",
+                options=[""] + cols_a,
+                index=([""] + cols_a).index(row.get("a_val", "")) if row.get("a_val", "") in ([""] + cols_a) else 0,
+                key=f"v22_val_a_{i}",
+            )
+        with cvb:
+            b_choice = st.selectbox(
+                f"Valor Base 2 #{i+1}",
+                options=[""] + cols_b,
+                index=([""] + cols_b).index(row.get("b_val", "")) if row.get("b_val", "") in ([""] + cols_b) else 0,
+                key=f"v22_val_b_{i}",
+            )
+        with cvl:
+            default_label = row.get("label", "") or (_suggest_label(a_choice, b_choice) if a_choice or b_choice else "")
+            label = st.text_input(f"Nome do valor #{i+1}", value=default_label, key=f"v22_val_lbl_{i}")
+        value_rows[i] = {"a_val": a_choice, "b_val": b_choice, "label": label}
 
-if make_summary:
-    st.markdown("### Como deseja montar o resumo executivo?")
-    executive_group = st.multiselect(
-        "Agrupar resumo por",
-        options=default_group,
-        default=default_group,
-        key="v20_exec_group",
-    )
-    executive_values = st.multiselect(
-        "O que deseja totalizar/confrontar",
-        options=default_values,
-        default=default_values,
-        key="v20_exec_vals",
-    )
-else:
-    executive_group = []
-    executive_values = []
+    if st.button("Adicionar campo de valor"):
+        value_rows.append({"a_val": "", "b_val": "", "label": ""})
+    st.session_state["v22_value_rows"] = value_rows
 
-if st.button("Executar análise", type="primary", use_container_width=True):
-    try:
-        result = build_analysis(
-            df_a=df_a,
-            df_b=df_b,
-            base1_name=base1_name,
-            base2_name=base2_name,
-            key_pairs=st.session_state.v20_key_pairs,
-            compare_pairs=st.session_state.v20_compare_pairs,
-            rules=st.session_state.v20_rules,
-            executive_group_labels=executive_group,
-            executive_value_labels=executive_values,
+    # --- Resumo executivo
+    st.subheader("5) Resumo executivo")
+    gen_exec = st.checkbox("Gerar resumo executivo", value=True)
+
+    valid_pair_rows = [r for r in pair_rows if r.get("a_col") and (r.get("b_col") or str(r.get("a_col", "")).startswith("[MAP]"))]
+    valid_value_rows = [r for r in value_rows if r.get("a_val") and r.get("b_val")]
+
+    default_group_labels = [r.get("label") or _suggest_label(r["a_col"], r.get("b_col", "")) for r in valid_pair_rows]
+    default_value_labels = [r.get("label") or _suggest_label(r["a_val"], r["b_val"]) for r in valid_value_rows]
+
+    group_choices = []
+    value_choices = []
+    if gen_exec:
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            group_choices = st.multiselect(
+                "Agrupar resumo por",
+                options=default_group_labels,
+                default=default_group_labels,
+                key="v22_group_choices",
+            )
+        with gc2:
+            value_choices = st.multiselect(
+                "O que deseja totalizar/confrontar",
+                options=default_value_labels,
+                default=default_value_labels,
+                key="v22_value_choices",
+            )
+
+    # --- Executar
+    st.subheader("6) Processar")
+    if st.button("Executar análise"):
+        if not valid_pair_rows:
+            st.error("Adicione pelo menos um campo identificador válido.")
+            return
+        if not valid_value_rows:
+            st.error("Adicione pelo menos um campo de valor válido.")
+            return
+
+        # completa labels faltantes
+        for r in valid_pair_rows:
+            if not r.get("label"):
+                r["label"] = _suggest_label(r["a_col"], r.get("b_col", ""))
+        for r in valid_value_rows:
+            if not r.get("label"):
+                r["label"] = _suggest_label(r["a_val"], r["b_val"])
+
+        full_df, only_a, only_b, dups = compose_match(df_a_mapped, df_b, valid_pair_rows, valid_value_rows)
+
+        # Enriquecimento quando houver [MAP] para rastreabilidade
+        for r in valid_pair_rows:
+            a_col = r["a_col"]
+            if a_col.startswith("[MAP]"):
+                hit = next((m for m in mapped_info if m["mapped_col"] == a_col), None)
+                if hit:
+                    source_col = hit["source_col"]
+                    target_col = hit["target_col"]
+                    src_col_full = f"{source_col}_BASE1" if f"{source_col}_BASE1" in full_df.columns else source_col
+                    map_col_full = f"{a_col}_BASE1" if f"{a_col}_BASE1" in full_df.columns else a_col
+                    tgt_col_full = f"{target_col}_BASE2" if target_col and f"{target_col}_BASE2" in full_df.columns else target_col
+                    if src_col_full in full_df.columns:
+                        full_df[f"BASE1_ORIGINAL_{r['label']}"] = _force_text_series(full_df[src_col_full])
+                    if map_col_full in full_df.columns:
+                        full_df[f"BASE1_MAPEADO_{r['label']}"] = _force_text_series(full_df[map_col_full])
+                    if tgt_col_full and tgt_col_full in full_df.columns:
+                        full_df[f"BASE2_CORRESP_{r['label']}"] = _force_text_series(full_df[tgt_col_full])
+
+        selected_group = group_choices or default_group_labels
+        selected_values = value_choices or default_value_labels
+        top_exec, summary_exec = build_executive_summary(full_df, selected_group, selected_values)
+
+        excel_bytes = export_excel(
+            full_df=full_df,
+            only_a=only_a,
+            only_b=only_b,
+            dups=dups,
+            top_exec=top_exec,
+            summary_exec=summary_exec,
+            base1_name=st.session_state["v22_base1_name"],
+            base2_name=st.session_state["v22_base2_name"],
         )
-        st.session_state.v20_analysis = result
-    except Exception as e:
-        st.exception(e)
 
-result = st.session_state.v20_analysis
-if result:
-    st.markdown("## 5) Resultado da análise")
-    kpis_df = result["kpis_df"].copy()
-    if not kpis_df.empty:
-        st.markdown("### Impacto financeiro total")
-        st.dataframe(kpis_df, use_container_width=True)
+        st.success("Análise concluída.")
+        st.markdown("**Topo executivo**")
+        st.dataframe(top_exec, use_container_width=True)
+        st.markdown("**Resumo por chave**")
+        st.dataframe(summary_exec, use_container_width=True)
+        st.markdown("**Resultado completo**")
+        st.dataframe(full_df.head(200), use_container_width=True)
 
-    if make_summary:
-        st.markdown("### Resumo executivo por chave")
-        st.dataframe(result["resumo_exec"], use_container_width=True, hide_index=True)
-        st.markdown("### Ponte de conciliação")
-        st.dataframe(result["bridge_df"], use_container_width=True, hide_index=True)
+        st.download_button(
+            "Baixar Excel da análise",
+            data=excel_bytes,
+            file_name="Match_Inteligente_V22.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
-    view_df = result["df_result"]
-    if only_div:
-        view_df = result["divergencias"]
-    elif include_not_found:
-        view_df = result["df_result"]
-    else:
-        view_df = result["df_result"][result["df_result"]["STATUS_BASE"].eq("CASADO")]
 
-    st.markdown("### Resultado completo")
-    st.dataframe(view_df, use_container_width=True, hide_index=True)
-
-    excel_bytes = to_excel_package(result, base1_name, base2_name)
-    st.download_button(
-        "Baixar análise (Excel)",
-        data=excel_bytes,
-        file_name=f"Match_Inteligente_V20_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+if __name__ == "__main__":
+    main()
