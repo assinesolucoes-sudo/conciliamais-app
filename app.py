@@ -29,17 +29,27 @@ def _norm_name(x: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _to_text(sr: pd.Series) -> pd.Series:
+def _to_text(sr) -> pd.Series:
+    if isinstance(sr, pd.DataFrame):
+        if sr.shape[1] == 0:
+            return pd.Series([""] * len(sr), index=sr.index)
+        sr = sr.iloc[:, 0]
     return sr.fillna("").astype(str).map(_clean_text)
 
 
-def _to_key(sr: pd.Series) -> pd.Series:
+def _to_key(sr) -> pd.Series:
     return _to_text(sr).str.upper()
 
 
-def _to_number(sr: pd.Series) -> pd.Series:
+def _to_number(sr) -> pd.Series:
+    if isinstance(sr, pd.DataFrame):
+        if sr.shape[1] == 0:
+            return pd.Series([0.0] * len(sr), index=sr.index)
+        sr = sr.iloc[:, 0]
+
     if pd.api.types.is_numeric_dtype(sr):
         return pd.to_numeric(sr, errors="coerce").fillna(0.0)
+
     s = sr.fillna("").astype(str).str.strip()
     s = s.str.replace(r"\s", "", regex=True)
     mask_br = s.str.contains(",", na=False)
@@ -111,6 +121,24 @@ def _build_hash_key_from_cols(df: pd.DataFrame, cols: List[str]) -> pd.Series:
     if not cols:
         return pd.Series([0] * len(df), index=df.index, dtype="uint64")
     return pd.util.hash_pandas_object(df[cols], index=False).astype("uint64")
+
+
+def _safe_get_series(df: pd.DataFrame, col_name: str, default_text: bool = True) -> pd.Series:
+    if col_name not in df.columns:
+        if default_text:
+            return pd.Series([""] * len(df), index=df.index)
+        return pd.Series([0.0] * len(df), index=df.index)
+
+    obj = df[col_name]
+
+    if isinstance(obj, pd.DataFrame):
+        if obj.shape[1] == 0:
+            if default_text:
+                return pd.Series([""] * len(df), index=df.index)
+            return pd.Series([0.0] * len(df), index=df.index)
+        return obj.iloc[:, 0]
+
+    return obj
 
 
 def _prepare_base_for_matching(
@@ -239,14 +267,9 @@ def _run_reconciliation(
         a_raw = f"{kp['a']}_A" if f"{kp['a']}_A" in merged.columns else kp["a"]
         b_raw = f"{kp['b']}_B" if f"{kp['b']}_B" in merged.columns else kp["b"]
 
-        s = pd.Series([""] * len(merged), index=merged.index, dtype="object")
-
-        if a_raw in merged.columns:
-            s = _to_text(merged[a_raw])
-
-        if b_raw in merged.columns:
-            sb = _to_text(merged[b_raw])
-            s = s.where(s.ne(""), sb)
+        s = _to_text(_safe_get_series(merged, a_raw, default_text=True))
+        sb = _to_text(_safe_get_series(merged, b_raw, default_text=True))
+        s = s.where(s.ne(""), sb)
 
         merged[f"DIM::{label}"] = s
 
@@ -256,11 +279,8 @@ def _run_reconciliation(
         a_num = f"NUM::{lbl}_A" if f"NUM::{lbl}_A" in merged.columns else f"NUM::{lbl}"
         b_num = f"NUM::{lbl}_B" if f"NUM::{lbl}_B" in merged.columns else f"NUM::{lbl}"
 
-        aval = merged[a_num] if a_num in merged.columns else pd.Series(0.0, index=merged.index)
-        bval = merged[b_num] if b_num in merged.columns else pd.Series(0.0, index=merged.index)
-
-        aval = pd.to_numeric(aval, errors="coerce").fillna(0.0).round(2)
-        bval = pd.to_numeric(bval, errors="coerce").fillna(0.0).round(2)
+        aval = _to_number(_safe_get_series(merged, a_num, default_text=False)).round(2)
+        bval = _to_number(_safe_get_series(merged, b_num, default_text=False)).round(2)
 
         merged[f"VALOR::{lbl}::{base1_name}"] = aval
         merged[f"VALOR::{lbl}::{base2_name}"] = bval
