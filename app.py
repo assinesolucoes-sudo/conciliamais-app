@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Central de Análises - Consistência entre Bases V30", layout="wide")
+st.set_page_config(page_title="Central de Análises - Consistência entre Bases V30 Estável", layout="wide")
 
 
 # ============================================================
@@ -267,8 +267,7 @@ def _run_reconciliation_cached(
     }
 
 
-@st.cache_data(show_spinner=False)
-def _build_executive_and_detail_cached(
+def _build_executive_and_detail_stable(
     results: Dict[str, pd.DataFrame],
     group_labels_t: Tuple[str, ...],
     value_labels_t: Tuple[str, ...],
@@ -276,15 +275,21 @@ def _build_executive_and_detail_cached(
     base2_name: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     df = results["full"].copy()
-    value_labels = list(value_labels_t)
 
-    group_labels = list(group_labels_t)
+    available_value_labels = list(results.get("value_labels", []))
+    available_key_labels = list(results.get("key_labels", []))
+
+    value_labels = [lbl for lbl in list(value_labels_t) if lbl in available_value_labels]
+    if not value_labels:
+        value_labels = available_value_labels.copy()
+
+    group_labels = [lbl for lbl in list(group_labels_t) if lbl in available_key_labels]
     if not group_labels:
-        group_labels = results["key_labels"][:1] if results["key_labels"] else ["MOTIVO"]
+        group_labels = available_key_labels[:1] if available_key_labels else []
 
     group_cols = []
     for lbl in group_labels:
-        col = f"DIM::{lbl}" if f"DIM::{lbl}" in df.columns else lbl
+        col = f"DIM::{lbl}"
         if col in df.columns:
             group_cols.append(col)
 
@@ -294,38 +299,59 @@ def _build_executive_and_detail_cached(
 
     agg_map = {}
     for lbl in value_labels:
-        agg_map[f"VALOR::{lbl}::{base1_name}"] = "sum"
-        agg_map[f"VALOR::{lbl}::{base2_name}"] = "sum"
-        agg_map[f"DIF::{lbl}"] = "sum"
+        col_a = f"VALOR::{lbl}::{base1_name}"
+        col_b = f"VALOR::{lbl}::{base2_name}"
+        col_d = f"DIF::{lbl}"
+
+        if col_a in df.columns:
+            agg_map[col_a] = "sum"
+        if col_b in df.columns:
+            agg_map[col_b] = "sum"
+        if col_d in df.columns:
+            agg_map[col_d] = "sum"
 
     exec_df = df.groupby(group_cols, dropna=False).agg(agg_map).reset_index()
 
-    motive = (
-        df[df["MOTIVO"].ne("Conciliado")]
-        .groupby(group_cols, dropna=False)
-        .apply(_top_reason_from_df)
-        .reset_index(name="Motivo predominante da diferença")
-    )
+    motivo_base = df[df["MOTIVO"].ne("Conciliado")].copy()
+    if motivo_base.empty:
+        motive = pd.DataFrame(columns=group_cols + ["Motivo predominante da diferença"])
+    else:
+        motive = (
+            motivo_base.groupby(group_cols, dropna=False)
+            .apply(_top_reason_from_df)
+            .reset_index(name="Motivo predominante da diferença")
+        )
 
     exec_df = exec_df.merge(motive, on=group_cols, how="left")
     exec_df["Motivo predominante da diferença"] = exec_df["Motivo predominante da diferença"].fillna("")
 
     rename_map = {c: c.replace("DIM::", "") for c in group_cols}
     for lbl in value_labels:
-        rename_map[f"VALOR::{lbl}::{base1_name}"] = f"{lbl} {base1_name}"
-        rename_map[f"VALOR::{lbl}::{base2_name}"] = f"{lbl} {base2_name}"
-        rename_map[f"DIF::{lbl}"] = f"Diferença {lbl}"
+        col_a = f"VALOR::{lbl}::{base1_name}"
+        col_b = f"VALOR::{lbl}::{base2_name}"
+        col_d = f"DIF::{lbl}"
+
+        if col_a in exec_df.columns:
+            rename_map[col_a] = f"{lbl} {base1_name}"
+        if col_b in exec_df.columns:
+            rename_map[col_b] = f"{lbl} {base2_name}"
+        if col_d in exec_df.columns:
+            rename_map[col_d] = f"Diferença {lbl}"
 
     exec_df = exec_df.rename(columns=rename_map)
 
     ponte_rows = []
     for lbl in value_labels:
+        col_d = f"DIF::{lbl}"
+        if col_d not in df.columns:
+            continue
+
         ponte_rows.append(
             {
                 "Agrupador": "TOTAL GERAL",
                 "Campo confrontado": lbl,
                 "Componente": f"Chave só na {base1_name}",
-                "Valor": round(df.loc[df["MOTIVO"].eq(f"Chave só na {base1_name}"), f"DIF::{lbl}"].sum(), 2),
+                "Valor": round(df.loc[df["MOTIVO"].eq(f"Chave só na {base1_name}"), col_d].sum(), 2),
             }
         )
         ponte_rows.append(
@@ -333,7 +359,7 @@ def _build_executive_and_detail_cached(
                 "Agrupador": "TOTAL GERAL",
                 "Campo confrontado": lbl,
                 "Componente": f"Chave só na {base2_name}",
-                "Valor": round(df.loc[df["MOTIVO"].eq(f"Chave só na {base2_name}"), f"DIF::{lbl}"].sum(), 2),
+                "Valor": round(df.loc[df["MOTIVO"].eq(f"Chave só na {base2_name}"), col_d].sum(), 2),
             }
         )
         ponte_rows.append(
@@ -342,7 +368,7 @@ def _build_executive_and_detail_cached(
                 "Campo confrontado": lbl,
                 "Componente": f"Valor divergente entre {base1_name} e {base2_name}",
                 "Valor": round(
-                    df.loc[df["MOTIVO"].eq(f"Valor divergente entre {base1_name} e {base2_name}"), f"DIF::{lbl}"].sum(),
+                    df.loc[df["MOTIVO"].eq(f"Valor divergente entre {base1_name} e {base2_name}"), col_d].sum(),
                     2,
                 ),
             }
@@ -352,13 +378,13 @@ def _build_executive_and_detail_cached(
                 "Agrupador": "TOTAL GERAL",
                 "Campo confrontado": lbl,
                 "Componente": "Duplicidade",
-                "Valor": round(df.loc[df["MOTIVO"].eq("Duplicidade"), f"DIF::{lbl}"].sum(), 2),
+                "Valor": round(df.loc[df["MOTIVO"].eq("Duplicidade"), col_d].sum(), 2),
             }
         )
 
         grp = (
             df[df["MOTIVO"].ne("Conciliado")]
-            .groupby(group_cols + ["MOTIVO"], dropna=False)[f"DIF::{lbl}"]
+            .groupby(group_cols + ["MOTIVO"], dropna=False)[col_d]
             .sum()
             .reset_index()
         )
@@ -370,7 +396,7 @@ def _build_executive_and_detail_cached(
                     "Agrupador": agrupador,
                     "Campo confrontado": lbl,
                     "Componente": row["MOTIVO"],
-                    "Valor": round(row[f"DIF::{lbl}"], 2),
+                    "Valor": round(row[col_d], 2),
                 }
             )
 
@@ -379,42 +405,52 @@ def _build_executive_and_detail_cached(
     detail = df[df["MOTIVO"].ne("Conciliado")].copy()
 
     detail_cols = []
-    for lbl in results["key_labels"]:
+    for lbl in available_key_labels:
         col = f"DIM::{lbl}"
         if col in detail.columns:
             detail_cols.append(col)
 
     value_cols = []
     for lbl in value_labels:
-        value_cols.extend(
-            [
-                f"VALOR::{lbl}::{base1_name}",
-                f"VALOR::{lbl}::{base2_name}",
-                f"DIF::{lbl}",
-            ]
-        )
+        col_a = f"VALOR::{lbl}::{base1_name}"
+        col_b = f"VALOR::{lbl}::{base2_name}"
+        col_d = f"DIF::{lbl}"
 
-    detail = detail[detail_cols + value_cols + ["MOTIVO"]].copy()
-    detail = detail.rename(columns=rename_map)
+        if col_a in detail.columns:
+            value_cols.append(col_a)
+        if col_b in detail.columns:
+            value_cols.append(col_b)
+        if col_d in detail.columns:
+            value_cols.append(col_d)
 
+    final_cols = detail_cols + value_cols + (["MOTIVO"] if "MOTIVO" in detail.columns else [])
+    detail = detail[final_cols].copy()
+
+    detail_rename = {c: c.replace("DIM::", "") for c in detail_cols}
     for lbl in value_labels:
-        detail = detail.rename(
-            columns={
-                f"VALOR::{lbl}::{base1_name}": f"{lbl} {base1_name}",
-                f"VALOR::{lbl}::{base2_name}": f"{lbl} {base2_name}",
-                f"DIF::{lbl}": f"Diferença {lbl}",
-            }
-        )
+        col_a = f"VALOR::{lbl}::{base1_name}"
+        col_b = f"VALOR::{lbl}::{base2_name}"
+        col_d = f"DIF::{lbl}"
+
+        if col_a in detail.columns:
+            detail_rename[col_a] = f"{lbl} {base1_name}"
+        if col_b in detail.columns:
+            detail_rename[col_b] = f"{lbl} {base2_name}"
+        if col_d in detail.columns:
+            detail_rename[col_d] = f"Diferença {lbl}"
+
+    detail = detail.rename(columns=detail_rename)
 
     if value_labels:
-        diff_col = f"Diferença {value_labels[0]}"
-        if diff_col in exec_df.columns:
-            exec_df = (
-                exec_df.assign(__ABS__=exec_df[diff_col].abs())
-                .sort_values("__ABS__", ascending=False)
-                .drop(columns=["__ABS__"])
-            )
-        if diff_col in detail.columns:
+        diff_candidates = [f"Diferença {lbl}" for lbl in value_labels if f"Diferença {lbl}" in detail.columns]
+        if diff_candidates:
+            diff_col = diff_candidates[0]
+            if diff_col in exec_df.columns:
+                exec_df = (
+                    exec_df.assign(__ABS__=exec_df[diff_col].abs())
+                    .sort_values("__ABS__", ascending=False)
+                    .drop(columns=["__ABS__"])
+                )
             detail = (
                 detail.assign(__ABS__=detail[diff_col].abs())
                 .sort_values("__ABS__", ascending=False)
@@ -718,18 +754,16 @@ def _render_key_mapping_form(cols_a: List[str], cols_b: List[str]):
 
             new_rows.append({"a": a_col, "b": b_col, "label": label})
 
-        salvar = st.form_submit_button("Salvar chaves")
+        salvar = st.form_submit_button("Confirmar chaves")
 
     if salvar:
         st.session_state["cm_key_rows"] = new_rows
         st.session_state["cm_saved_key_rows"] = [r for r in new_rows if _clean_text(r["a"]) and _clean_text(r["b"])]
-        st.success("Chaves salvas.")
+        st.success("Chaves confirmadas.")
 
-    c_add, _ = st.columns([0.3, 0.7])
-    with c_add:
-        if st.button("Adicionar par-chave"):
-            st.session_state["cm_key_rows"].append({"a": "", "b": "", "label": ""})
-            st.rerun()
+    if st.button("Adicionar chave"):
+        st.session_state["cm_key_rows"].append({"a": "", "b": "", "label": ""})
+        st.rerun()
 
 
 def _render_value_mapping_form(cols_a: List[str], cols_b: List[str]):
@@ -767,18 +801,16 @@ def _render_value_mapping_form(cols_a: List[str], cols_b: List[str]):
 
             new_rows.append({"a": a_col, "b": b_col, "label": label})
 
-        salvar = st.form_submit_button("Salvar campos de valor")
+        salvar = st.form_submit_button("Confirmar campos de valor")
 
     if salvar:
         st.session_state["cm_val_rows"] = new_rows
         st.session_state["cm_saved_val_rows"] = [r for r in new_rows if _clean_text(r["a"]) and _clean_text(r["b"])]
-        st.success("Campos de valor salvos.")
+        st.success("Campos de valor confirmados.")
 
-    c_add, _ = st.columns([0.35, 0.65])
-    with c_add:
-        if st.button("Adicionar campo de valor"):
-            st.session_state["cm_val_rows"].append({"a": "", "b": "", "label": ""})
-            st.rerun()
+    if st.button("Adicionar campo de valor"):
+        st.session_state["cm_val_rows"].append({"a": "", "b": "", "label": ""})
+        st.rerun()
 
 
 def _render_output_form(valid_keys: List[dict], valid_vals: List[dict]):
@@ -812,13 +844,13 @@ def _render_output_form(valid_keys: List[dict], valid_vals: List[dict]):
                 else []
             )
 
-        salvar = st.form_submit_button("Salvar opções")
+        salvar = st.form_submit_button("Confirmar opções")
 
     if salvar:
         st.session_state["cm_generate_exec"] = gerar_exec
         st.session_state["cm_group_labels"] = group_labels
         st.session_state["cm_total_labels"] = total_labels
-        st.success("Opções salvas.")
+        st.success("Opções confirmadas.")
 
 
 # ============================================================
@@ -864,11 +896,11 @@ def main():
 
     if executar:
         if not valid_keys:
-            st.error("Salve pelo menos um par-chave válido.")
+            st.error("Confirme pelo menos uma chave válida.")
             return
 
         if not valid_vals:
-            st.error("Salve pelo menos um campo de valor válido.")
+            st.error("Confirme pelo menos um campo de valor válido.")
             return
 
         key_pairs_t = _rows_to_tuple(valid_keys)
@@ -877,8 +909,14 @@ def main():
         group_labels_t = tuple(st.session_state.get("cm_group_labels", []))
         total_labels_t = tuple(st.session_state.get("cm_total_labels", []))
 
+        valid_key_labels = [r[2] for r in key_pairs_t]
+        valid_value_labels = [r[2] for r in value_pairs_t]
+
+        group_labels_t = tuple([x for x in group_labels_t if x in valid_key_labels])
+        total_labels_t = tuple([x for x in total_labels_t if x in valid_value_labels])
+
         if not total_labels_t:
-            total_labels_t = tuple(r[2] for r in value_pairs_t)
+            total_labels_t = tuple(valid_value_labels)
 
         with st.spinner("Processando análise..."):
             results = _run_reconciliation_cached(
@@ -890,7 +928,7 @@ def main():
                 base2_name,
             )
 
-            exec_df, detail_df, ponte_df = _build_executive_and_detail_cached(
+            exec_df, detail_df, ponte_df = _build_executive_and_detail_stable(
                 results,
                 group_labels_t,
                 total_labels_t,
@@ -925,7 +963,7 @@ def main():
         st.download_button(
             "Baixar Excel da análise",
             data=excel,
-            file_name="Central_Analises_V30.xlsx",
+            file_name="Central_Analises_V30_Estavel.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
