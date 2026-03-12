@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Concilia Mais - Match Inteligente V24", layout="wide")
+st.set_page_config(page_title="Concilia Mais - Match Inteligente V25", layout="wide")
 
 # ============================================================
 # Helpers
@@ -64,7 +64,8 @@ def _friendly_label(a: str, b: str) -> str:
         ("conta", "Conta Contábil"),
         ("saldo", "Saldo"),
         ("aquisicao", "Aquisição"),
-        ("depreciacao", "Depreciação"),
+        ("depreciacao mensal", "Dep. Mensal"),
+        ("depreciacao", "Dep. Acumulada"),
         ("grupo patrimonio", "Grupo Patrimônio"),
         ("nome bem", "Nome Bem"),
     ]
@@ -153,11 +154,22 @@ def _parse_rule_upload(uploaded) -> List[dict]:
     return [{"source_col": k[0], "target_col": k[1], "mapping": v} for k, v in grouped.items()]
 
 
-def _top_reason(series: pd.Series) -> str:
+def _top_reason_diff(series: pd.Series) -> str:
     s = series.dropna().astype(str)
+    s = s[~s.eq("Conciliado")]
     if s.empty:
-        return ""
+        return "Sem diferença"
     return s.value_counts().index[0]
+
+
+def _money_cols(df: pd.DataFrame) -> List[str]:
+    cols = []
+    for c in df.columns:
+        uc = str(c).upper()
+        if any(tag in uc for tag in ["TOTAL", "DIFERENÇA", "VALOR"]) or uc.startswith("SALDO ") or uc.startswith("AQUISIÇÃO ") or uc.startswith("DEP.") or uc.startswith("DEP "):
+            if pd.api.types.is_numeric_dtype(df[c]):
+                cols.append(c)
+    return cols
 
 
 # ============================================================
@@ -200,18 +212,10 @@ def _apply_rules_to_base1(df: pd.DataFrame, rules: List[dict]) -> Tuple[pd.DataF
 
 
 # ============================================================
-# Motor de conciliação
+# Motor
 # ============================================================
 
-def _run_reconciliation(
-    df_a: pd.DataFrame,
-    df_b: pd.DataFrame,
-    key_pairs: List[dict],
-    value_pairs: List[dict],
-    mapped_meta: List[dict],
-    base1_name: str,
-    base2_name: str,
-) -> Dict[str, pd.DataFrame]:
+def _run_reconciliation(df_a, df_b, key_pairs, value_pairs, mapped_meta, base1_name, base2_name):
     a = df_a.copy()
     b = df_b.copy()
 
@@ -224,7 +228,6 @@ def _run_reconciliation(
 
     a["__MATCH_KEY__"] = _build_key(a, [f"KEY::{lbl}" for lbl in key_labels])
     b["__MATCH_KEY__"] = _build_key(b, [f"KEY::{lbl}" for lbl in key_labels])
-
     a["__OCC__"] = a.groupby("__MATCH_KEY__").cumcount() + 1
     b["__OCC__"] = b.groupby("__MATCH_KEY__").cumcount() + 1
 
@@ -253,8 +256,8 @@ def _run_reconciliation(
         value_labels.append(lbl)
         a_col = f"{vp['a']}_A" if f"{vp['a']}_A" in merged.columns else vp["a"]
         b_col = f"{vp['b']}_B" if f"{vp['b']}_B" in merged.columns else vp["b"]
-        aval = _to_number(merged[a_col]) if a_col in merged.columns else pd.Series([0.0] * len(merged))
-        bval = _to_number(merged[b_col]) if b_col in merged.columns else pd.Series([0.0] * len(merged))
+        aval = _to_number(merged[a_col]) if a_col in merged.columns else pd.Series([0.0] * len(merged), index=merged.index)
+        bval = _to_number(merged[b_col]) if b_col in merged.columns else pd.Series([0.0] * len(merged), index=merged.index)
         merged[f"VALOR::{lbl}::A"] = aval.round(2)
         merged[f"VALOR::{lbl}::B"] = bval.round(2)
         merged[f"DIF::{lbl}"] = (aval - bval).round(2)
@@ -274,7 +277,7 @@ def _run_reconciliation(
     for lbl in value_labels:
         any_diff = any_diff + merged[f"DIF::{lbl}"].abs()
 
-    motivo_base = np.select(
+    merged["MOTIVO"] = np.select(
         [
             merged["PRESENCA"].eq("Somente Base 1"),
             merged["PRESENCA"].eq("Somente Base 2"),
@@ -289,7 +292,6 @@ def _run_reconciliation(
         ],
         default="Conciliado",
     )
-    merged["MOTIVO"] = motivo_base
 
     for meta in mapped_meta:
         mapped_col = meta["mapped_col"]
@@ -309,28 +311,22 @@ def _run_reconciliation(
     for lbl in value_labels:
         total_a = round(merged[f"VALOR::{lbl}::A"].sum(), 2)
         total_b = round(merged[f"VALOR::{lbl}::B"].sum(), 2)
-        resumo_global_rows.append(
-            {
-                "Campo confrontado": lbl,
-                f"Total {base1_name}": total_a,
-                f"Total {base2_name}": total_b,
-                "Diferença total": round(total_a - total_b, 2),
-            }
-        )
-    resumo_global = pd.DataFrame(resumo_global_rows)
+        resumo_global_rows.append({
+            "Campo confrontado": lbl,
+            f"Total {base1_name}": total_a,
+            f"Total {base2_name}": total_b,
+            "Diferença total": round(total_a - total_b, 2),
+        })
+    return {
+        "full": merged,
+        "resumo_global": pd.DataFrame(resumo_global_rows),
+        "value_labels": value_labels,
+        "key_labels": key_labels,
+    }
 
-    return {"full": merged, "resumo_global": resumo_global, "value_labels": value_labels, "key_labels": key_labels}
 
-
-def _build_executive_and_detail(
-    results: Dict[str, pd.DataFrame],
-    group_labels: List[str],
-    value_labels: List[str],
-    base1_name: str,
-    base2_name: str,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _build_outputs(results, group_labels, value_labels, base1_name, base2_name):
     df = results["full"].copy()
-
     if not group_labels:
         group_labels = results["key_labels"][:1] if results["key_labels"] else ["MOTIVO"]
 
@@ -343,60 +339,80 @@ def _build_executive_and_detail(
         df["DIM::Resumo"] = "Resumo Geral"
         group_cols = ["DIM::Resumo"]
 
-    # Resumo executivo: apenas agrupador + valores + diferença + motivo predominante
     agg_map = {}
     for lbl in value_labels:
         agg_map[f"VALOR::{lbl}::A"] = "sum"
         agg_map[f"VALOR::{lbl}::B"] = "sum"
         agg_map[f"DIF::{lbl}"] = "sum"
 
-    exec_df = df.groupby(group_cols, dropna=False).agg(agg_map).reset_index()
-    motive = df.groupby(group_cols, dropna=False)["MOTIVO"].agg(_top_reason).reset_index().rename(columns={"MOTIVO": "Motivo predominante da diferença"})
-    exec_df = exec_df.merge(motive, on=group_cols, how="left")
+    resumo_exec = df.groupby(group_cols, dropna=False).agg(agg_map).reset_index()
+    motive = (
+        df[df["MOTIVO"].ne("Conciliado")]
+        .groupby(group_cols, dropna=False)["MOTIVO"]
+        .agg(_top_reason_diff)
+        .reset_index()
+        .rename(columns={"MOTIVO": "Motivo predominante da diferença"})
+    )
+    resumo_exec = resumo_exec.merge(motive, on=group_cols, how="left")
+    resumo_exec["Motivo predominante da diferença"] = resumo_exec["Motivo predominante da diferença"].fillna("Sem diferença")
 
     rename_map = {c: c.replace("DIM::", "") for c in group_cols}
     for lbl in value_labels:
         rename_map[f"VALOR::{lbl}::A"] = f"{lbl} {base1_name}"
         rename_map[f"VALOR::{lbl}::B"] = f"{lbl} {base2_name}"
         rename_map[f"DIF::{lbl}"] = f"Diferença {lbl}"
-    exec_df = exec_df.rename(columns=rename_map)
+    resumo_exec = resumo_exec.rename(columns=rename_map)
 
-    # Ponte da conciliação: global e por agrupador
-    ponte_rows = []
+    ponte_total_rows = []
+    ponte_agrup_rows = []
     for lbl in value_labels:
-        ponte_rows.append({"Agrupador": "TOTAL GERAL", "Campo confrontado": lbl, "Componente": f"Chave só na {base1_name}", "Valor": round(df.loc[df['MOTIVO'].eq(f'Chave só na {base1_name}'), f'DIF::{lbl}'].sum(), 2)})
-        ponte_rows.append({"Agrupador": "TOTAL GERAL", "Campo confrontado": lbl, "Componente": f"Chave só na {base2_name}", "Valor": round(df.loc[df['MOTIVO'].eq(f'Chave só na {base2_name}'), f'DIF::{lbl}'].sum(), 2)})
-        ponte_rows.append({"Agrupador": "TOTAL GERAL", "Campo confrontado": lbl, "Componente": f"Valor divergente entre {base1_name} e {base2_name}", "Valor": round(df.loc[df['MOTIVO'].eq(f'Valor divergente entre {base1_name} e {base2_name}'), f'DIF::{lbl}'].sum(), 2)})
-        ponte_rows.append({"Agrupador": "TOTAL GERAL", "Campo confrontado": lbl, "Componente": "Duplicidade", "Valor": round(df.loc[df['MOTIVO'].eq('Duplicidade'), f'DIF::{lbl}'].sum(), 2)})
-        ponte_rows.append({"Agrupador": "TOTAL GERAL", "Campo confrontado": lbl, "Componente": "Diferença final", "Valor": round(df[f'DIF::{lbl}'].sum(), 2)})
+        motivos = [
+            f"Chave só na {base1_name}",
+            f"Chave só na {base2_name}",
+            f"Valor divergente entre {base1_name} e {base2_name}",
+            "Duplicidade",
+        ]
+        for motivo in motivos:
+            ponte_total_rows.append({
+                "Campo confrontado": lbl,
+                "Componente": motivo,
+                "Valor": round(df.loc[df["MOTIVO"].eq(motivo), f"DIF::{lbl}"].sum(), 2),
+            })
+        ponte_total_rows.append({
+            "Campo confrontado": lbl,
+            "Componente": "Diferença final",
+            "Valor": round(df[f"DIF::{lbl}"].sum(), 2),
+        })
 
-        if group_cols:
-            grp = df.groupby(group_cols + ["MOTIVO"], dropna=False)[f"DIF::{lbl}"].sum().reset_index()
-            for _, row in grp.iterrows():
-                agrupador = " | ".join([_clean_text(row[c]) for c in group_cols])
-                ponte_rows.append({
-                    "Agrupador": agrupador,
-                    "Campo confrontado": lbl,
-                    "Componente": row["MOTIVO"],
-                    "Valor": round(row[f"DIF::{lbl}"], 2),
-                })
-    ponte_df = pd.DataFrame(ponte_rows)
+        grp = df.groupby(group_cols + ["MOTIVO"], dropna=False)[f"DIF::{lbl}"].sum().reset_index()
+        for _, row in grp.iterrows():
+            if row["MOTIVO"] == "Conciliado" and abs(float(row[f"DIF::{lbl}"])) < 0.0001:
+                continue
+            agrupador = " | ".join([_clean_text(row[c]) for c in group_cols])
+            ponte_agrup_rows.append({
+                "Agrupador": agrupador,
+                "Campo confrontado": lbl,
+                "Componente": row["MOTIVO"],
+                "Valor": round(row[f"DIF::{lbl}"], 2),
+            })
 
-    # Detalhe das diferenças
-    detail = df[df["MOTIVO"].ne("Conciliado")].copy()
+    ponte_total = pd.DataFrame(ponte_total_rows)
+    ponte_agrup = pd.DataFrame(ponte_agrup_rows)
+
+    detalhe = df[df["MOTIVO"].ne("Conciliado")].copy()
     detail_cols = []
     for lbl in results["key_labels"]:
         col = f"DIM::{lbl}"
-        if col in detail.columns:
+        if col in detalhe.columns:
             detail_cols.append(col)
-    extra_cols = [c for c in detail.columns if c.startswith(f"{base1_name} original::") or c.startswith(f"{base1_name} mapeado::") or c.startswith(f"{base2_name}::")]
+    extra_cols = [c for c in detalhe.columns if c.startswith(f"{base1_name} original::") or c.startswith(f"{base1_name} mapeado::") or c.startswith(f"{base2_name}::")]
     value_cols = []
     for lbl in value_labels:
         value_cols.extend([f"VALOR::{lbl}::A", f"VALOR::{lbl}::B", f"DIF::{lbl}"])
-    detail = detail[detail_cols + extra_cols + value_cols + ["MOTIVO"]].copy()
-    detail = detail.rename(columns=rename_map)
+    detalhe = detalhe[detail_cols + extra_cols + value_cols + ["MOTIVO"]].copy()
+    detalhe = detalhe.rename(columns=rename_map)
     for lbl in value_labels:
-        detail = detail.rename(columns={
+        detalhe = detalhe.rename(columns={
             f"VALOR::{lbl}::A": f"{lbl} {base1_name}",
             f"VALOR::{lbl}::B": f"{lbl} {base2_name}",
             f"DIF::{lbl}": f"Diferença {lbl}",
@@ -404,82 +420,96 @@ def _build_executive_and_detail(
 
     if value_labels:
         diff_col = f"Diferença {value_labels[0]}"
-        if diff_col in exec_df.columns:
-            exec_df = exec_df.assign(__ABS__=exec_df[diff_col].abs()).sort_values("__ABS__", ascending=False).drop(columns=["__ABS__"])
-        if diff_col in detail.columns:
-            detail = detail.assign(__ABS__=detail[diff_col].abs()).sort_values("__ABS__", ascending=False).drop(columns=["__ABS__"])
+        if diff_col in resumo_exec.columns:
+            resumo_exec = resumo_exec.assign(__ABS__=resumo_exec[diff_col].abs()).sort_values("__ABS__", ascending=False).drop(columns=["__ABS__"])
+        if diff_col in detalhe.columns:
+            detalhe = detalhe.assign(__ABS__=detalhe[diff_col].abs()).sort_values("__ABS__", ascending=False).drop(columns=["__ABS__"])
 
-    return exec_df, detalhe if False else detail, ponte_df
+    return resumo_exec, detalhe, ponte_total, ponte_agrup
 
 
 # ============================================================
 # Excel
 # ============================================================
 
-def _set_column_formats(writer, sheet_name: str, df: pd.DataFrame):
-    wb = writer.book
-    ws = writer.sheets[sheet_name]
-
+def _set_formats(ws, wb, df):
     fmt_head = wb.add_format({"bold": True, "bg_color": "#D9EAF7", "border": 1, "align": "center", "valign": "vcenter"})
     fmt_text = wb.add_format({"border": 1})
     fmt_money = wb.add_format({"border": 1, "num_format": 'R$ #,##0.00'})
     fmt_diff = wb.add_format({"border": 1, "num_format": 'R$ #,##0.00', "font_color": "#C00000", "bold": True})
     fmt_int = wb.add_format({"border": 1, "num_format": '0'})
-
     for i, col in enumerate(df.columns):
         ws.write(0, i, col, fmt_head)
         ser = df[col]
         width = max(len(str(col)), min(60, ser.astype(str).map(len).max() if len(ser) else 10)) + 2
         uc = str(col).upper()
-        if any(x in uc for x in ["DIFERENÇA", "TOTAL "]) and pd.api.types.is_numeric_dtype(ser):
-            ws.set_column(i, i, width, fmt_diff if "DIFERENÇA" in uc else fmt_money)
-        elif any(x in uc for x in ["VALOR", st.session_state['cm_base1_name'].upper(), st.session_state['cm_base2_name'].upper(), "TOTAL"]) and pd.api.types.is_numeric_dtype(ser):
+        if "DIFERENÇA" in uc and pd.api.types.is_numeric_dtype(ser):
+            ws.set_column(i, i, width, fmt_diff)
+        elif pd.api.types.is_numeric_dtype(ser):
             ws.set_column(i, i, width, fmt_money)
         elif uc.startswith("QTD") or uc.startswith("QTDE"):
             ws.set_column(i, i, width, fmt_int)
         else:
             ws.set_column(i, i, width, fmt_text)
-
     ws.freeze_panes(1, 0)
     ws.autofilter(0, 0, len(df), max(0, len(df.columns) - 1))
 
 
-def _add_total_row(writer, sheet_name: str, df: pd.DataFrame):
+def _add_subtotal_row(ws, wb, df, start_row=1):
     if df.empty:
         return
-    wb = writer.book
-    ws = writer.sheets[sheet_name]
-    total_row = len(df) + 1
-    fmt_total_txt = wb.add_format({"bold": True, "bg_color": "#FFF2CC", "border": 1})
+    row = start_row + len(df)
+    fmt_total_lbl = wb.add_format({"bold": True, "bg_color": "#FFF2CC", "border": 1})
     fmt_total_money = wb.add_format({"bold": True, "bg_color": "#FFF2CC", "border": 1, "num_format": 'R$ #,##0.00'})
-    ws.write(total_row, 0, "TOTAL FILTRADO", fmt_total_txt)
-    for col_idx, col in enumerate(df.columns[1:], start=1):
+    ws.write(row, 0, "TOTAL FILTRADO", fmt_total_lbl)
+    for idx, col in enumerate(df.columns[1:], start=1):
         if pd.api.types.is_numeric_dtype(df[col]):
-            col_letter = chr(65 + col_idx) if col_idx < 26 else None
+            col_letter = chr(65 + idx) if idx < 26 else None
             if col_letter:
-                ws.write_formula(total_row, col_idx, f"=SUBTOTAL(109,{col_letter}2:{col_letter}{len(df)+1})", fmt_total_money)
+                ws.write_formula(row, idx, f"=SUBTOTAL(109,{col_letter}{start_row+1}:{col_letter}{start_row+len(df)})", fmt_total_money)
 
 
-def _export_excel(resumo_global: pd.DataFrame, resumo_exec: pd.DataFrame, detalhe: pd.DataFrame, ponte: pd.DataFrame, regras_df: pd.DataFrame) -> bytes:
+def _export_excel(resumo_global, resumo_exec, detalhe, ponte_total, ponte_agrup, regras_df):
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
-        resumo_global.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False, startrow=0)
-        start_exec = len(resumo_global) + 3
-        resumo_exec.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False, startrow=start_exec)
+        wb = writer.book
+
+        # RESUMO EXECUTIVO em dois blocos bem separados
+        resumo_global.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False, startrow=1)
+        resumo_exec.to_excel(writer, sheet_name="RESUMO_EXECUTIVO", index=False, startrow=len(resumo_global) + 5)
+        ws_exec = writer.sheets["RESUMO_EXECUTIVO"]
+        title_fmt = wb.add_format({"bold": True, "font_size": 14, "font_color": "#1F1F1F"})
+        section_fmt = wb.add_format({"bold": True, "font_size": 12, "font_color": "#1F1F1F", "bg_color": "#E2F0D9", "border": 1})
+        ws_exec.write(0, 0, "Resumo Executivo", title_fmt)
+        ws_exec.write(1, 0, "Fechamento global dos campos confrontados", section_fmt)
+        ws_exec.write(len(resumo_global) + 4, 0, "Diferença por agrupador", section_fmt)
+        _set_formats(ws_exec, wb, pd.concat([resumo_global, resumo_exec], ignore_index=True))
+
         detalhe.to_excel(writer, sheet_name="DETALHE_DIFERENCAS", index=False)
-        ponte.to_excel(writer, sheet_name="PONTE_CONCILIACAO", index=False)
+        ws_det = writer.sheets["DETALHE_DIFERENCAS"]
+        _set_formats(ws_det, wb, detalhe)
+        _add_subtotal_row(ws_det, wb, detalhe, start_row=1)
+
+        # Ponte separada em dois blocos: total geral fora do filtro, agrupador filtrável
+        ponte_total.to_excel(writer, sheet_name="PONTE_CONCILIACAO", index=False, startrow=1)
+        ponte_agrup.to_excel(writer, sheet_name="PONTE_CONCILIACAO", index=False, startrow=len(ponte_total) + 5)
+        ws_ponte = writer.sheets["PONTE_CONCILIACAO"]
+        ws_ponte.write(0, 0, "Ponte da Conciliação - Total Geral", section_fmt)
+        ws_ponte.write(len(ponte_total) + 4, 0, "Ponte da Conciliação por Agrupador", section_fmt)
+        _set_formats(ws_ponte, wb, ponte_total)
+        # aplica filtro apenas no bloco inferior
+        if not ponte_agrup.empty:
+            start = len(ponte_total) + 5
+            for i, col in enumerate(ponte_agrup.columns):
+                ws_ponte.write(start, i, col, wb.add_format({"bold": True, "bg_color": "#D9EAF7", "border": 1, "align": "center"}))
+            ws_ponte.autofilter(start, 0, start + len(ponte_agrup), max(0, len(ponte_agrup.columns) - 1))
+            ws_ponte.freeze_panes(start + 1, 0)
+            _add_subtotal_row(ws_ponte, wb, ponte_agrup, start_row=start + 1)
+
         if len(regras_df):
             regras_df.to_excel(writer, sheet_name="REGRAS_APLICADAS", index=False)
-
-        _set_column_formats(writer, "RESUMO_EXECUTIVO", pd.concat([resumo_global, resumo_exec], axis=0, ignore_index=True))
-        _set_column_formats(writer, "DETALHE_DIFERENCAS", detalhe)
-        _set_column_formats(writer, "PONTE_CONCILIACAO", ponte)
-        if len(regras_df):
-            _set_column_formats(writer, "REGRAS_APLICADAS", regras_df)
-
-        # total filtrado onde fizer sentido
-        _add_total_row(writer, "DETALHE_DIFERENCAS", detalhe)
-        _add_total_row(writer, "PONTE_CONCILIACAO", ponte)
+            ws_reg = writer.sheets["REGRAS_APLICADAS"]
+            _set_formats(ws_reg, wb, regras_df)
 
     return bio.getvalue()
 
@@ -490,8 +520,8 @@ def _export_excel(resumo_global: pd.DataFrame, resumo_exec: pd.DataFrame, detalh
 
 def main():
     _init_state()
-    st.title("Concilia Mais - Match Inteligente V24")
-    st.caption("Ferramenta de conciliação: fecha o total, mostra onde está a diferença e explica o motivo.")
+    st.title("Concilia Mais - Match Inteligente V25")
+    st.caption("Ferramenta de conciliação: fecha o total, mostra onde está a diferença, explica o motivo e entrega um Excel executivo.")
 
     st.subheader("1) Bases da análise")
     c1, c2 = st.columns(2)
@@ -587,7 +617,6 @@ def main():
         with k3:
             label = st.text_input(f"Nome da dimensão #{i+1}", value=row.get("label") or _friendly_label(a_col, b_col), key=f"cm_key_lbl_{i}")
         st.session_state["cm_key_rows"][i] = {"a": a_col, "b": b_col, "label": label}
-
     if st.button("Adicionar par-chave"):
         st.session_state["cm_key_rows"].append({"a": "", "b": "", "label": ""})
 
@@ -602,7 +631,6 @@ def main():
         with v3:
             label = st.text_input(f"Nome do valor #{i+1}", value=row.get("label") or _friendly_label(a_col, b_col), key=f"cm_val_lbl_{i}")
         st.session_state["cm_val_rows"][i] = {"a": a_col, "b": b_col, "label": label}
-
     if st.button("Adicionar campo de valor"):
         st.session_state["cm_val_rows"].append({"a": "", "b": "", "label": ""})
 
@@ -639,7 +667,7 @@ def main():
                 r["label"] = _friendly_label(r["a"], r["b"])
 
         results = _run_reconciliation(df_a2, df_b, valid_keys, valid_vals, mapped_meta, base1_name, base2_name)
-        exec_df, detail_df, ponte_df = _build_executive_and_detail(results, group_labels, total_labels or default_total, base1_name, base2_name)
+        resumo_exec, detail_df, ponte_total, ponte_agrup = _build_outputs(results, group_labels, total_labels or default_total, base1_name, base2_name)
 
         if not incluir_so and "MOTIVO" in detail_df.columns:
             detail_df = detail_df[~detail_df["MOTIVO"].isin([f"Chave só na {base1_name}", f"Chave só na {base2_name}"])]
@@ -655,22 +683,24 @@ def main():
                 })
         rules_df = pd.DataFrame(rules_rows)
 
-        excel = _export_excel(results["resumo_global"], exec_df, detail_df, ponte_df, rules_df)
+        excel = _export_excel(results["resumo_global"], resumo_exec, detail_df, ponte_total, ponte_agrup, rules_df)
 
         st.success("Análise concluída.")
         st.markdown("**Resumo da conciliação**")
         st.dataframe(results["resumo_global"], use_container_width=True)
         if gerar_exec:
             st.markdown("**Resumo executivo**")
-            st.dataframe(exec_df, use_container_width=True)
-            st.markdown("**Ponte da conciliação**")
-            st.dataframe(ponte_df, use_container_width=True)
+            st.dataframe(resumo_exec, use_container_width=True)
+            st.markdown("**Ponte da conciliação - total geral**")
+            st.dataframe(ponte_total, use_container_width=True)
+            st.markdown("**Ponte da conciliação - por agrupador**")
+            st.dataframe(ponte_agrup, use_container_width=True)
         st.markdown("**Detalhe das diferenças**")
         st.dataframe(detail_df.head(200), use_container_width=True)
         st.download_button(
             "Baixar Excel da análise",
             data=excel,
-            file_name="ConciliaMais_V24.xlsx",
+            file_name="ConciliaMais_V25.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
