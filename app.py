@@ -1,3 +1,4 @@
+import hashlib
 import re
 import unicodedata
 from io import BytesIO
@@ -7,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Central de Análises - Consistência entre Bases V29", layout="wide")
+st.set_page_config(page_title="Central de Análises - Consistência entre Bases V30", layout="wide")
 
 
 # ============================================================
@@ -39,10 +40,13 @@ def _to_key(sr: pd.Series) -> pd.Series:
 def _to_number(sr: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(sr):
         return pd.to_numeric(sr, errors="coerce").fillna(0.0)
+
     s = sr.fillna("").astype(str).str.strip()
     s = s.str.replace(r"\s", "", regex=True)
+
     mask_br = s.str.contains(",", na=False)
     s.loc[mask_br] = s.loc[mask_br].str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+
     s = s.str.replace(r"[^0-9\-\.]", "", regex=True)
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
@@ -60,6 +64,7 @@ def _friendly_label(a: str, b: str) -> str:
     na = _norm_name(a)
     nb = _norm_name(b)
     joined = f"{na} {nb}"
+
     mapping = [
         ("filial", "Filial"),
         ("patrimonio", "Patrimônio"),
@@ -78,11 +83,14 @@ def _friendly_label(a: str, b: str) -> str:
         ("documento", "Documento"),
         ("data", "Data"),
     ]
+
     for key, label in mapping:
         if key in joined:
             return label
+
     if _clean_text(a) == _clean_text(b) and _clean_text(a):
         return _clean_text(a)
+
     return f"{_clean_text(a)} ↔ {_clean_text(b)}"
 
 
@@ -96,13 +104,30 @@ def _top_reason_from_df(df: pd.DataFrame) -> str:
     return s.value_counts().index[0]
 
 
+def _file_signature(file_bytes: bytes, file_name: str) -> str:
+    return hashlib.md5(file_name.encode("utf-8") + b"||" + file_bytes).hexdigest()
+
+
+def _rows_to_tuple(rows: List[dict]) -> Tuple[Tuple[str, str, str], ...]:
+    return tuple(
+        (
+            _clean_text(r.get("a", "")),
+            _clean_text(r.get("b", "")),
+            _clean_text(r.get("label", "")),
+        )
+        for r in rows
+        if _clean_text(r.get("a", "")) and _clean_text(r.get("b", ""))
+    )
+
+
 # ============================================================
-# Cache de leitura e preparação
+# Cache
 # ============================================================
 
 @st.cache_data(show_spinner=False)
-def _read_file_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+def _read_file_cached(file_bytes: bytes, file_name: str, signature: str) -> pd.DataFrame:
     name = file_name.lower()
+
     if name.endswith(".csv"):
         for sep in [";", ",", None]:
             try:
@@ -112,6 +137,7 @@ def _read_file_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
             except Exception:
                 pass
         raise ValueError(f"Não foi possível ler o CSV: {file_name}")
+
     return pd.read_excel(BytesIO(file_bytes), dtype=str)
 
 
@@ -120,35 +146,18 @@ def _get_column_list(columns: Tuple[str, ...]) -> List[str]:
     return list(columns)
 
 
-# ============================================================
-# Estado
-# ============================================================
-
-def _init_state():
-    defaults = {
-        "cm_base1_name": "Base 1",
-        "cm_base2_name": "Base 2",
-        "cm_key_rows": [{"a": "", "b": "", "label": ""}],
-        "cm_val_rows": [{"a": "", "b": "", "label": ""}],
-        "cm_run_clicked": False,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-# ============================================================
-# Motor de conciliação
-# ============================================================
-
-def _run_reconciliation(
+@st.cache_data(show_spinner=False)
+def _run_reconciliation_cached(
     df_a: pd.DataFrame,
     df_b: pd.DataFrame,
-    key_pairs: List[dict],
-    value_pairs: List[dict],
+    key_pairs_t: Tuple[Tuple[str, str, str], ...],
+    value_pairs_t: Tuple[Tuple[str, str, str], ...],
     base1_name: str,
     base2_name: str,
 ) -> Dict[str, pd.DataFrame]:
+    key_pairs = [{"a": a, "b": b, "label": lbl} for a, b, lbl in key_pairs_t]
+    value_pairs = [{"a": a, "b": b, "label": lbl} for a, b, lbl in value_pairs_t]
+
     a = df_a.copy()
     b = df_b.copy()
 
@@ -177,21 +186,26 @@ def _run_reconciliation(
         label = kp["label"]
         a_col = f"{kp['a']}_A" if f"{kp['a']}_A" in merged.columns else kp["a"]
         b_col = f"{kp['b']}_B" if f"{kp['b']}_B" in merged.columns else kp["b"]
+
         s = pd.Series([""] * len(merged), index=merged.index)
         if a_col in merged.columns:
             s = _to_text(merged[a_col])
         if b_col in merged.columns:
             s = s.where(s.ne(""), _to_text(merged[b_col]))
+
         merged[f"DIM::{label}"] = s
 
     value_labels = []
     for vp in value_pairs:
         lbl = vp["label"]
         value_labels.append(lbl)
+
         a_col = f"{vp['a']}_A" if f"{vp['a']}_A" in merged.columns else vp["a"]
         b_col = f"{vp['b']}_B" if f"{vp['b']}_B" in merged.columns else vp["b"]
+
         aval = _to_number(merged[a_col]) if a_col in merged.columns else pd.Series([0.0] * len(merged))
         bval = _to_number(merged[b_col]) if b_col in merged.columns else pd.Series([0.0] * len(merged))
+
         merged[f"VALOR::{lbl}::{base1_name}"] = aval.round(2)
         merged[f"VALOR::{lbl}::{base2_name}"] = bval.round(2)
         merged[f"DIF::{lbl}"] = (aval - bval).round(2)
@@ -242,6 +256,7 @@ def _run_reconciliation(
                 "Diferença total": round(total_a - total_b, 2),
             }
         )
+
     resumo_global = pd.DataFrame(resumo_global_rows)
 
     return {
@@ -252,15 +267,18 @@ def _run_reconciliation(
     }
 
 
-def _build_executive_and_detail(
+@st.cache_data(show_spinner=False)
+def _build_executive_and_detail_cached(
     results: Dict[str, pd.DataFrame],
-    group_labels: List[str],
-    value_labels: List[str],
+    group_labels_t: Tuple[str, ...],
+    value_labels_t: Tuple[str, ...],
     base1_name: str,
     base2_name: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     df = results["full"].copy()
+    value_labels = list(value_labels_t)
 
+    group_labels = list(group_labels_t)
     if not group_labels:
         group_labels = results["key_labels"][:1] if results["key_labels"] else ["MOTIVO"]
 
@@ -323,7 +341,10 @@ def _build_executive_and_detail(
                 "Agrupador": "TOTAL GERAL",
                 "Campo confrontado": lbl,
                 "Componente": f"Valor divergente entre {base1_name} e {base2_name}",
-                "Valor": round(df.loc[df["MOTIVO"].eq(f"Valor divergente entre {base1_name} e {base2_name}"), f"DIF::{lbl}"].sum(), 2),
+                "Valor": round(
+                    df.loc[df["MOTIVO"].eq(f"Valor divergente entre {base1_name} e {base2_name}"), f"DIF::{lbl}"].sum(),
+                    2,
+                ),
             }
         )
         ponte_rows.append(
@@ -365,11 +386,13 @@ def _build_executive_and_detail(
 
     value_cols = []
     for lbl in value_labels:
-        value_cols.extend([
-            f"VALOR::{lbl}::{base1_name}",
-            f"VALOR::{lbl}::{base2_name}",
-            f"DIF::{lbl}",
-        ])
+        value_cols.extend(
+            [
+                f"VALOR::{lbl}::{base1_name}",
+                f"VALOR::{lbl}::{base2_name}",
+                f"DIF::{lbl}",
+            ]
+        )
 
     detail = detail[detail_cols + value_cols + ["MOTIVO"]].copy()
     detail = detail.rename(columns=rename_map)
@@ -399,6 +422,27 @@ def _build_executive_and_detail(
             )
 
     return exec_df, detail, ponte_df
+
+
+# ============================================================
+# Estado
+# ============================================================
+
+def _init_state():
+    defaults = {
+        "cm_base1_name": "Base 1",
+        "cm_base2_name": "Base 2",
+        "cm_key_rows": [{"a": "", "b": "", "label": ""}],
+        "cm_val_rows": [{"a": "", "b": "", "label": ""}],
+        "cm_saved_key_rows": [],
+        "cm_saved_val_rows": [],
+        "cm_group_labels": [],
+        "cm_total_labels": [],
+        "cm_generate_exec": True,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
 # ============================================================
@@ -446,6 +490,7 @@ def _add_total_row(writer, sheet_name: str, df: pd.DataFrame, skip_when_only_tot
     wb = writer.book
     ws = writer.sheets[sheet_name]
     total_row = len(df) + 1
+
     fmt_total_txt = wb.add_format({"bold": True, "bg_color": "#FFF2CC", "border": 1})
     fmt_total_money = wb.add_format({"bold": True, "bg_color": "#FFF2CC", "border": 1, "num_format": 'R$ #,##0.00'})
     fmt_total_int = wb.add_format({"bold": True, "bg_color": "#FFF2CC", "border": 1, "num_format": "0"})
@@ -571,6 +616,7 @@ def _export_excel(resumo_global: pd.DataFrame, resumo_exec: pd.DataFrame, detalh
             ws, wb, 3, 0, "Fechamento global dos campos confrontados", resumo_global,
             money_cols=list(resumo_global.select_dtypes(include=[np.number]).columns)
         )
+
         row_b = _write_dataframe_block(
             ws, wb, 3, 6, "Indicadores executivos", metricas, money_cols=["Valor"], int_cols=[]
         )
@@ -619,16 +665,10 @@ def _export_excel(resumo_global: pd.DataFrame, resumo_exec: pd.DataFrame, detalh
 
 
 # ============================================================
-# App
+# Interface
 # ============================================================
 
-def main():
-    _init_state()
-
-    st.title("Central de Análises")
-    st.subheader("Análise de Consistência entre Bases")
-    st.caption("Confronta valores entre duas bases, fecha totais, destaca divergências e mostra onde está o impacto.")
-
+def _render_base_section():
     st.subheader("1) Bases da análise")
     c1, c2 = st.columns(2)
 
@@ -640,6 +680,160 @@ def main():
         st.session_state["cm_base2_name"] = st.text_input("Nome da Base 2", st.session_state["cm_base2_name"])
         up_b = st.file_uploader("Arquivo Base 2", type=["xlsx", "xls", "csv"], key="cm_up_b")
 
+    return up_a, up_b
+
+
+def _render_key_mapping_form(cols_a: List[str], cols_b: List[str]):
+    st.subheader("2) Campos que identificam o mesmo registro nas duas bases")
+    st.caption("A chave encontra o registro correspondente.")
+
+    with st.form("form_chaves", clear_on_submit=False):
+        new_rows = []
+        for i, row in enumerate(st.session_state["cm_key_rows"]):
+            k1, k2, k3 = st.columns([1.2, 1.2, 0.8])
+
+            default_a = row.get("a", "")
+            default_b = row.get("b", "")
+            default_label = row.get("label", "")
+
+            with k1:
+                a_col = st.selectbox(
+                    f"Base 1 #{i+1}",
+                    [""] + cols_a,
+                    index=([""] + cols_a).index(default_a) if default_a in ([""] + cols_a) else 0,
+                    key=f"form_key_a_{i}",
+                )
+
+            with k2:
+                b_col = st.selectbox(
+                    f"Base 2 #{i+1}",
+                    [""] + cols_b,
+                    index=([""] + cols_b).index(default_b) if default_b in ([""] + cols_b) else 0,
+                    key=f"form_key_b_{i}",
+                )
+
+            with k3:
+                sug = default_label or _friendly_label(a_col, b_col)
+                label = st.text_input(f"Nome da dimensão #{i+1}", value=sug, key=f"form_key_lbl_{i}")
+
+            new_rows.append({"a": a_col, "b": b_col, "label": label})
+
+        salvar = st.form_submit_button("Salvar chaves")
+
+    if salvar:
+        st.session_state["cm_key_rows"] = new_rows
+        st.session_state["cm_saved_key_rows"] = [r for r in new_rows if _clean_text(r["a"]) and _clean_text(r["b"])]
+        st.success("Chaves salvas.")
+
+    c_add, _ = st.columns([0.3, 0.7])
+    with c_add:
+        if st.button("Adicionar par-chave"):
+            st.session_state["cm_key_rows"].append({"a": "", "b": "", "label": ""})
+            st.rerun()
+
+
+def _render_value_mapping_form(cols_a: List[str], cols_b: List[str]):
+    st.subheader("3) Quais campos deseja confrontar para validar valores")
+    st.caption("Os valores medem o impacto da conciliação.")
+
+    with st.form("form_valores", clear_on_submit=False):
+        new_rows = []
+        for i, row in enumerate(st.session_state["cm_val_rows"]):
+            v1, v2, v3 = st.columns([1.2, 1.2, 0.8])
+
+            default_a = row.get("a", "")
+            default_b = row.get("b", "")
+            default_label = row.get("label", "")
+
+            with v1:
+                a_col = st.selectbox(
+                    f"Valor Base 1 #{i+1}",
+                    [""] + cols_a,
+                    index=([""] + cols_a).index(default_a) if default_a in ([""] + cols_a) else 0,
+                    key=f"form_val_a_{i}",
+                )
+
+            with v2:
+                b_col = st.selectbox(
+                    f"Valor Base 2 #{i+1}",
+                    [""] + cols_b,
+                    index=([""] + cols_b).index(default_b) if default_b in ([""] + cols_b) else 0,
+                    key=f"form_val_b_{i}",
+                )
+
+            with v3:
+                sug = default_label or _friendly_label(a_col, b_col)
+                label = st.text_input(f"Nome do valor #{i+1}", value=sug, key=f"form_val_lbl_{i}")
+
+            new_rows.append({"a": a_col, "b": b_col, "label": label})
+
+        salvar = st.form_submit_button("Salvar campos de valor")
+
+    if salvar:
+        st.session_state["cm_val_rows"] = new_rows
+        st.session_state["cm_saved_val_rows"] = [r for r in new_rows if _clean_text(r["a"]) and _clean_text(r["b"])]
+        st.success("Campos de valor salvos.")
+
+    c_add, _ = st.columns([0.35, 0.65])
+    with c_add:
+        if st.button("Adicionar campo de valor"):
+            st.session_state["cm_val_rows"].append({"a": "", "b": "", "label": ""})
+            st.rerun()
+
+
+def _render_output_form(valid_keys: List[dict], valid_vals: List[dict]):
+    st.subheader("4) Como deseja receber o resultado?")
+
+    default_group = [r.get("label") or _friendly_label(r.get("a", ""), r.get("b", "")) for r in valid_keys]
+    default_total = [r.get("label") or _friendly_label(r.get("a", ""), r.get("b", "")) for r in valid_vals]
+
+    with st.form("form_saida", clear_on_submit=False):
+        gerar_exec = st.checkbox("Gerar resumo executivo", value=st.session_state.get("cm_generate_exec", True))
+
+        g1, g2 = st.columns(2)
+        with g1:
+            group_labels = (
+                st.multiselect(
+                    "Agrupar resumo por",
+                    options=default_group,
+                    default=st.session_state.get("cm_group_labels", default_group[:1] if default_group else []),
+                )
+                if gerar_exec
+                else []
+            )
+        with g2:
+            total_labels = (
+                st.multiselect(
+                    "O que deseja totalizar/confrontar",
+                    options=default_total,
+                    default=st.session_state.get("cm_total_labels", default_total),
+                )
+                if gerar_exec
+                else []
+            )
+
+        salvar = st.form_submit_button("Salvar opções")
+
+    if salvar:
+        st.session_state["cm_generate_exec"] = gerar_exec
+        st.session_state["cm_group_labels"] = group_labels
+        st.session_state["cm_total_labels"] = total_labels
+        st.success("Opções salvas.")
+
+
+# ============================================================
+# App
+# ============================================================
+
+def main():
+    _init_state()
+
+    st.title("Central de Análises")
+    st.subheader("Análise de Consistência entre Bases")
+    st.caption("Confronta valores entre duas bases, fecha totais, destaca divergências e mostra onde está o impacto.")
+
+    up_a, up_b = _render_base_section()
+
     if not up_a or not up_b:
         st.info("Carregue as duas bases para continuar.")
         return
@@ -647,124 +841,81 @@ def main():
     base1_name = st.session_state["cm_base1_name"]
     base2_name = st.session_state["cm_base2_name"]
 
+    sig_a = _file_signature(up_a.getvalue(), up_a.name)
+    sig_b = _file_signature(up_b.getvalue(), up_b.name)
+
     with st.spinner("Carregando bases..."):
-        df_a = _read_file_cached(up_a.getvalue(), up_a.name)
-        df_b = _read_file_cached(up_b.getvalue(), up_b.name)
+        df_a = _read_file_cached(up_a.getvalue(), up_a.name, sig_a)
+        df_b = _read_file_cached(up_b.getvalue(), up_b.name, sig_b)
 
     cols_a = _get_column_list(tuple(df_a.columns))
     cols_b = _get_column_list(tuple(df_b.columns))
 
-    st.subheader("2) Campos que identificam o mesmo registro nas duas bases")
-    st.caption("A chave encontra o registro correspondente.")
+    _render_key_mapping_form(cols_a, cols_b)
+    _render_value_mapping_form(cols_a, cols_b)
 
-    for i, row in enumerate(st.session_state["cm_key_rows"]):
-        k1, k2, k3 = st.columns([1.2, 1.2, 0.8])
+    valid_keys = st.session_state.get("cm_saved_key_rows", [])
+    valid_vals = st.session_state.get("cm_saved_val_rows", [])
 
-        with k1:
-            a_col = st.selectbox(f"Base 1 #{i+1}", [""] + cols_a, key=f"cm_key_a_{i}")
-
-        with k2:
-            b_suggest = row.get("b", "")
-            b_col = st.selectbox(
-                f"Base 2 #{i+1}",
-                [""] + cols_b,
-                index=([""] + cols_b).index(b_suggest) if b_suggest in ([""] + cols_b) else 0,
-                key=f"cm_key_b_{i}",
-            )
-
-        with k3:
-            label_default = row.get("label") or _friendly_label(a_col, b_col)
-            label = st.text_input(f"Nome da dimensão #{i+1}", value=label_default, key=f"cm_key_lbl_{i}")
-
-        st.session_state["cm_key_rows"][i] = {"a": a_col, "b": b_col, "label": label}
-
-    if st.button("Adicionar par-chave"):
-        st.session_state["cm_key_rows"].append({"a": "", "b": "", "label": ""})
-        st.rerun()
-
-    st.subheader("3) Quais campos deseja confrontar para validar valores")
-    st.caption("Os valores medem o impacto da conciliação.")
-
-    for i, row in enumerate(st.session_state["cm_val_rows"]):
-        v1, v2, v3 = st.columns([1.2, 1.2, 0.8])
-
-        with v1:
-            a_col = st.selectbox(f"Valor Base 1 #{i+1}", [""] + cols_a, key=f"cm_val_a_{i}")
-
-        with v2:
-            b_col = st.selectbox(f"Valor Base 2 #{i+1}", [""] + cols_b, key=f"cm_val_b_{i}")
-
-        with v3:
-            label_default = row.get("label") or _friendly_label(a_col, b_col)
-            label = st.text_input(f"Nome do valor #{i+1}", value=label_default, key=f"cm_val_lbl_{i}")
-
-        st.session_state["cm_val_rows"][i] = {"a": a_col, "b": b_col, "label": label}
-
-    if st.button("Adicionar campo de valor"):
-        st.session_state["cm_val_rows"].append({"a": "", "b": "", "label": ""})
-        st.rerun()
-
-    st.subheader("4) Como deseja receber o resultado?")
-    gerar_exec = st.checkbox("Gerar resumo executivo", value=True)
-
-    valid_keys = [r for r in st.session_state["cm_key_rows"] if r.get("a") and r.get("b")]
-    valid_vals = [r for r in st.session_state["cm_val_rows"] if r.get("a") and r.get("b")]
-
-    default_group = [r.get("label") or _friendly_label(r.get("a", ""), r.get("b", "")) for r in valid_keys]
-    default_total = [r.get("label") or _friendly_label(r.get("a", ""), r.get("b", "")) for r in valid_vals]
-
-    g1, g2 = st.columns(2)
-    with g1:
-        group_labels = st.multiselect(
-            "Agrupar resumo por",
-            options=default_group,
-            default=default_group[:1] if default_group else []
-        ) if gerar_exec else []
-    with g2:
-        total_labels = st.multiselect(
-            "O que deseja totalizar/confrontar",
-            options=default_total,
-            default=default_total
-        ) if gerar_exec else []
+    _render_output_form(valid_keys, valid_vals)
 
     st.subheader("5) Processar análise")
-    executar = st.button("Executar análise")
+    executar = st.button("Executar análise", type="primary")
 
     if executar:
         if not valid_keys:
-            st.error("Informe pelo menos um par-chave válido.")
+            st.error("Salve pelo menos um par-chave válido.")
             return
 
         if not valid_vals:
-            st.error("Informe pelo menos um campo de valor válido.")
+            st.error("Salve pelo menos um campo de valor válido.")
             return
 
-        for r in valid_keys:
-            if not r.get("label"):
-                r["label"] = _friendly_label(r["a"], r["b"])
+        key_pairs_t = _rows_to_tuple(valid_keys)
+        value_pairs_t = _rows_to_tuple(valid_vals)
 
-        for r in valid_vals:
-            if not r.get("label"):
-                r["label"] = _friendly_label(r["a"], r["b"])
+        group_labels_t = tuple(st.session_state.get("cm_group_labels", []))
+        total_labels_t = tuple(st.session_state.get("cm_total_labels", []))
+
+        if not total_labels_t:
+            total_labels_t = tuple(r[2] for r in value_pairs_t)
 
         with st.spinner("Processando análise..."):
-            results = _run_reconciliation(df_a, df_b, valid_keys, valid_vals, base1_name, base2_name)
-            exec_df, detail_df, ponte_df = _build_executive_and_detail(
-                results,
-                group_labels,
-                total_labels or default_total,
+            results = _run_reconciliation_cached(
+                df_a,
+                df_b,
+                key_pairs_t,
+                value_pairs_t,
                 base1_name,
                 base2_name,
             )
-            excel = _export_excel(results["resumo_global"], exec_df, detail_df, ponte_df, base1_name, base2_name)
+
+            exec_df, detail_df, ponte_df = _build_executive_and_detail_cached(
+                results,
+                group_labels_t,
+                total_labels_t,
+                base1_name,
+                base2_name,
+            )
+
+            excel = _export_excel(
+                results["resumo_global"],
+                exec_df,
+                detail_df,
+                ponte_df,
+                base1_name,
+                base2_name,
+            )
 
         st.success("Análise concluída.")
+
         st.markdown("**Resumo da conciliação**")
         st.dataframe(results["resumo_global"], use_container_width=True)
 
-        if gerar_exec:
+        if st.session_state.get("cm_generate_exec", True):
             st.markdown("**Resumo executivo**")
             st.dataframe(exec_df, use_container_width=True)
+
             st.markdown("**Ponte da conciliação**")
             st.dataframe(ponte_df, use_container_width=True)
 
@@ -774,7 +925,7 @@ def main():
         st.download_button(
             "Baixar Excel da análise",
             data=excel,
-            file_name="Central_Analises_V29.xlsx",
+            file_name="Central_Analises_V30.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
