@@ -1,5 +1,6 @@
 import re
 import unicodedata
+import time
 from io import BytesIO
 from typing import Dict, List, Tuple
 
@@ -7,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Central de Análises - Consistência entre Bases V29", layout="wide")
+st.set_page_config(page_title="Central de Análises - Consistência entre Bases V30", layout="wide")
 
 
 # ============================================================
@@ -96,6 +97,66 @@ def _top_reason_from_df(df: pd.DataFrame) -> str:
     return s.value_counts().index[0]
 
 
+def _unique_preserve_order(items: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def _build_hash_key_from_cols(df: pd.DataFrame, cols: List[str]) -> pd.Series:
+    if not cols:
+        return pd.Series([0] * len(df), index=df.index, dtype="uint64")
+    return pd.util.hash_pandas_object(df[cols], index=False).astype("uint64")
+
+
+def _prepare_base_for_matching(
+    df: pd.DataFrame,
+    key_pairs: List[dict],
+    value_pairs: List[dict],
+    side: str,
+) -> pd.DataFrame:
+    if side == "A":
+        raw_key_cols = [kp["a"] for kp in key_pairs if kp.get("a") in df.columns]
+        raw_val_cols = [vp["a"] for vp in value_pairs if vp.get("a") in df.columns]
+    else:
+        raw_key_cols = [kp["b"] for kp in key_pairs if kp.get("b") in df.columns]
+        raw_val_cols = [vp["b"] for vp in value_pairs if vp.get("b") in df.columns]
+
+    cols_needed = _unique_preserve_order(raw_key_cols + raw_val_cols)
+    base = df[cols_needed].copy()
+
+    for kp in key_pairs:
+        src = kp["a"] if side == "A" else kp["b"]
+        lbl = kp["label"]
+        if src in base.columns:
+            base[f"KEY::{lbl}"] = _to_key(base[src])
+        else:
+            base[f"KEY::{lbl}"] = ""
+
+    for vp in value_pairs:
+        src = vp["a"] if side == "A" else vp["b"]
+        lbl = vp["label"]
+        if src in base.columns:
+            base[f"NUM::{lbl}"] = _to_number(base[src]).round(2)
+        else:
+            base[f"NUM::{lbl}"] = 0.0
+
+    for c in base.columns:
+        if pd.api.types.is_object_dtype(base[c]):
+            nun = base[c].nunique(dropna=False)
+            if len(base) > 0 and nun <= max(50, int(len(base) * 0.2)):
+                try:
+                    base[c] = base[c].astype("category")
+                except Exception:
+                    pass
+
+    return base
+
+
 # ============================================================
 # Cache de leitura e preparação
 # ============================================================
@@ -149,21 +210,19 @@ def _run_reconciliation(
     base1_name: str,
     base2_name: str,
 ) -> Dict[str, pd.DataFrame]:
-    a = df_a.copy()
-    b = df_b.copy()
+    a = _prepare_base_for_matching(df_a, key_pairs, value_pairs, side="A")
+    b = _prepare_base_for_matching(df_b, key_pairs, value_pairs, side="B")
 
-    key_labels = []
-    for kp in key_pairs:
-        lbl = kp["label"]
-        key_labels.append(lbl)
-        a[f"KEY::{lbl}"] = _to_key(a[kp["a"]]) if kp["a"] in a.columns else ""
-        b[f"KEY::{lbl}"] = _to_key(b[kp["b"]]) if kp["b"] in b.columns else ""
+    key_labels = [kp["label"] for kp in key_pairs]
+    value_labels = [vp["label"] for vp in value_pairs]
 
-    a["__MATCH_KEY__"] = _build_key(a, [f"KEY::{lbl}" for lbl in key_labels])
-    b["__MATCH_KEY__"] = _build_key(b, [f"KEY::{lbl}" for lbl in key_labels])
+    key_cols = [f"KEY::{lbl}" for lbl in key_labels]
 
-    a["__OCC__"] = a.groupby("__MATCH_KEY__").cumcount() + 1
-    b["__OCC__"] = b.groupby("__MATCH_KEY__").cumcount() + 1
+    a["__MATCH_KEY__"] = _build_hash_key_from_cols(a, key_cols)
+    b["__MATCH_KEY__"] = _build_hash_key_from_cols(b, key_cols)
+
+    a["__OCC__"] = a.groupby("__MATCH_KEY__", sort=False).cumcount() + 1
+    b["__OCC__"] = b.groupby("__MATCH_KEY__", sort=False).cumcount() + 1
 
     merged = a.merge(
         b,
@@ -171,48 +230,76 @@ def _run_reconciliation(
         how="outer",
         suffixes=("_A", "_B"),
         indicator=True,
+        sort=False,
+        copy=False,
     )
 
     for kp in key_pairs:
         label = kp["label"]
-        a_col = f"{kp['a']}_A" if f"{kp['a']}_A" in merged.columns else kp["a"]
-        b_col = f"{kp['b']}_B" if f"{kp['b']}_B" in merged.columns else kp["b"]
-        s = pd.Series([""] * len(merged), index=merged.index)
-        if a_col in merged.columns:
-            s = _to_text(merged[a_col])
-        if b_col in merged.columns:
-            s = s.where(s.ne(""), _to_text(merged[b_col]))
+        a_raw = f"{kp['a']}_A" if f"{kp['a']}_A" in merged.columns else kp["a"]
+        b_raw = f"{kp['b']}_B" if f"{kp['b']}_B" in merged.columns else kp["b"]
+
+        s = pd.Series([""] * len(merged), index=merged.index, dtype="object")
+
+        if a_raw in merged.columns:
+            s = _to_text(merged[a_raw])
+
+        if b_raw in merged.columns:
+            sb = _to_text(merged[b_raw])
+            s = s.where(s.ne(""), sb)
+
         merged[f"DIM::{label}"] = s
 
-    value_labels = []
     for vp in value_pairs:
         lbl = vp["label"]
-        value_labels.append(lbl)
-        a_col = f"{vp['a']}_A" if f"{vp['a']}_A" in merged.columns else vp["a"]
-        b_col = f"{vp['b']}_B" if f"{vp['b']}_B" in merged.columns else vp["b"]
-        aval = _to_number(merged[a_col]) if a_col in merged.columns else pd.Series([0.0] * len(merged))
-        bval = _to_number(merged[b_col]) if b_col in merged.columns else pd.Series([0.0] * len(merged))
-        merged[f"VALOR::{lbl}::{base1_name}"] = aval.round(2)
-        merged[f"VALOR::{lbl}::{base2_name}"] = bval.round(2)
+
+        a_num = f"NUM::{lbl}_A" if f"NUM::{lbl}_A" in merged.columns else f"NUM::{lbl}"
+        b_num = f"NUM::{lbl}_B" if f"NUM::{lbl}_B" in merged.columns else f"NUM::{lbl}"
+
+        aval = merged[a_num] if a_num in merged.columns else pd.Series(0.0, index=merged.index)
+        bval = merged[b_num] if b_num in merged.columns else pd.Series(0.0, index=merged.index)
+
+        aval = pd.to_numeric(aval, errors="coerce").fillna(0.0).round(2)
+        bval = pd.to_numeric(bval, errors="coerce").fillna(0.0).round(2)
+
+        merged[f"VALOR::{lbl}::{base1_name}"] = aval
+        merged[f"VALOR::{lbl}::{base2_name}"] = bval
         merged[f"DIF::{lbl}"] = (aval - bval).round(2)
 
     merged["PRESENCA"] = merged["_merge"].map(
-        {"both": "Em ambas", "left_only": f"Somente {base1_name}", "right_only": f"Somente {base2_name}"}
+        {
+            "both": "Em ambas",
+            "left_only": f"Somente {base1_name}",
+            "right_only": f"Somente {base2_name}",
+        }
     )
 
-    dup_a = a.groupby("__MATCH_KEY__").size().rename("QTD_A")
-    dup_b = b.groupby("__MATCH_KEY__").size().rename("QTD_B")
-    dup = dup_a.to_frame().join(dup_b, how="outer").fillna(0).astype(int).reset_index()
+    dup_a = a.groupby("__MATCH_KEY__", sort=False).size().rename("QTD_A")
+    dup_b = b.groupby("__MATCH_KEY__", sort=False).size().rename("QTD_B")
+    dup = (
+        dup_a.to_frame()
+        .join(dup_b, how="outer")
+        .fillna(0)
+        .astype(int)
+        .reset_index()
+    )
     dup["DUPLICIDADE"] = np.where((dup["QTD_A"] > 1) | (dup["QTD_B"] > 1), 1, 0)
 
-    merged = merged.merge(dup[["__MATCH_KEY__", "QTD_A", "QTD_B", "DUPLICIDADE"]], on="__MATCH_KEY__", how="left")
+    merged = merged.merge(
+        dup[["__MATCH_KEY__", "QTD_A", "QTD_B", "DUPLICIDADE"]],
+        on="__MATCH_KEY__",
+        how="left",
+        sort=False,
+        copy=False,
+    )
+
     merged["QTD_A"] = merged["QTD_A"].fillna(0).astype(int)
     merged["QTD_B"] = merged["QTD_B"].fillna(0).astype(int)
     merged["DUPLICIDADE"] = merged["DUPLICIDADE"].fillna(0).astype(int)
 
-    any_diff = pd.Series([0.0] * len(merged), index=merged.index)
+    any_diff = pd.Series(0.0, index=merged.index)
     for lbl in value_labels:
-        any_diff = any_diff + merged[f"DIF::{lbl}"].abs()
+        any_diff = any_diff.add(merged[f"DIF::{lbl}"].abs(), fill_value=0.0)
 
     merged["MOTIVO"] = np.select(
         [
@@ -242,6 +329,7 @@ def _run_reconciliation(
                 "Diferença total": round(total_a - total_b, 2),
             }
         )
+
     resumo_global = pd.DataFrame(resumo_global_rows)
 
     return {
@@ -748,6 +836,8 @@ def main():
                 r["label"] = _friendly_label(r["a"], r["b"])
 
         with st.spinner("Processando análise..."):
+            t0 = time.perf_counter()
+
             results = _run_reconciliation(df_a, df_b, valid_keys, valid_vals, base1_name, base2_name)
             exec_df, detail_df, ponte_df = _build_executive_and_detail(
                 results,
@@ -756,9 +846,18 @@ def main():
                 base1_name,
                 base2_name,
             )
-            excel = _export_excel(results["resumo_global"], exec_df, detail_df, ponte_df, base1_name, base2_name)
+            excel = _export_excel(
+                results["resumo_global"],
+                exec_df,
+                detail_df,
+                ponte_df,
+                base1_name,
+                base2_name,
+            )
 
-        st.success("Análise concluída.")
+            elapsed = time.perf_counter() - t0
+
+        st.success(f"Análise concluída em {elapsed:.2f}s.")
         st.markdown("**Resumo da conciliação**")
         st.dataframe(results["resumo_global"], use_container_width=True)
 
@@ -774,7 +873,7 @@ def main():
         st.download_button(
             "Baixar Excel da análise",
             data=excel,
-            file_name="Central_Analises_V29.xlsx",
+            file_name="Central_Analises_V30.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
