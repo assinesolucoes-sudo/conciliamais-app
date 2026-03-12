@@ -34,7 +34,9 @@ def _to_text(sr) -> pd.Series:
         if sr.shape[1] == 0:
             return pd.Series([""] * len(sr), index=sr.index)
         sr = sr.iloc[:, 0]
-    return sr.fillna("").astype(str).map(_clean_text)
+
+    sr = pd.Series(sr, index=sr.index, dtype="object")
+    return sr.where(pd.notna(sr), "").astype(str).map(_clean_text)
 
 
 def _to_key(sr) -> pd.Series:
@@ -50,21 +52,13 @@ def _to_number(sr) -> pd.Series:
     if pd.api.types.is_numeric_dtype(sr):
         return pd.to_numeric(sr, errors="coerce").fillna(0.0)
 
-    s = sr.fillna("").astype(str).str.strip()
+    s = pd.Series(sr, index=sr.index, dtype="object")
+    s = s.where(pd.notna(s), "").astype(str).str.strip()
     s = s.str.replace(r"\s", "", regex=True)
     mask_br = s.str.contains(",", na=False)
     s.loc[mask_br] = s.loc[mask_br].str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
     s = s.str.replace(r"[^0-9\-\.]", "", regex=True)
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
-
-
-def _build_key(df: pd.DataFrame, cols: List[str]) -> pd.Series:
-    if not cols:
-        return pd.Series(["__ALL__"] * len(df), index=df.index)
-    out = _to_key(df[cols[0]])
-    for c in cols[1:]:
-        out = out + "||" + _to_key(df[c])
-    return out
 
 
 def _friendly_label(a: str, b: str) -> str:
@@ -172,15 +166,6 @@ def _prepare_base_for_matching(
             base[f"NUM::{lbl}"] = _to_number(base[src]).round(2)
         else:
             base[f"NUM::{lbl}"] = 0.0
-
-    for c in base.columns:
-        if pd.api.types.is_object_dtype(base[c]):
-            nun = base[c].nunique(dropna=False)
-            if len(base) > 0 and nun <= max(50, int(len(base) * 0.2)):
-                try:
-                    base[c] = base[c].astype("category")
-                except Exception:
-                    pass
 
     return base
 
