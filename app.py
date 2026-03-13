@@ -898,3 +898,232 @@ def _render_pair_line(df_a: pd.DataFrame, df_b: pd.DataFrame, cols_a: List[str],
     if selected_type != current_type:
         current_type = selected_type
         if not fmt_manual:
+            current_format = suggested_by_type.get(current_type, "")
+
+    format_disabled = current_type == "texto"
+
+    if current_type == "texto":
+        current_format = ""
+        fmt_manual = False
+
+    fmt_key = f"{prefix}_fmt_{idx}_{current_type}"
+
+    with cols[4]:
+        excel_format = st.text_input(
+            f"Formato no relatório #{idx+1}",
+            value=current_format,
+            key=fmt_key,
+            label_visibility="collapsed",
+            disabled=format_disabled,
+        )
+
+    if current_type == "texto":
+        excel_format = ""
+        fmt_manual = False
+    else:
+        fmt_manual = excel_format != suggested_by_type.get(current_type, "")
+
+    return {
+        "a": a_col,
+        "b": b_col,
+        "label": label,
+        "semantic_type": current_type,
+        "excel_format": excel_format,
+        "fmt_manual": fmt_manual,
+        "last_signature": signature,
+    }
+
+
+# ============================================================
+# App
+# ============================================================
+
+def main():
+    _init_state()
+
+    st.title("Central de Conciliações")
+    st.subheader("Análise de Consistência entre Bases")
+    st.caption("Compare duas bases, identifique divergências de registros e valores e gere relatórios executivos em Excel.")
+    _show_logs()
+
+    st.subheader("1) Dados da análise")
+    a1, c1, c2 = st.columns([1.2, 1, 1])
+
+    with a1:
+        st.session_state["cm_analysis_name"] = st.text_input("Nome da análise", st.session_state["cm_analysis_name"])
+
+    with c1:
+        st.session_state["cm_base1_name"] = st.text_input("Nome da Base 1", st.session_state["cm_base1_name"])
+        up_a = st.file_uploader("Arquivo da Base 1", type=["xlsx", "xls", "csv"], key="cm_up_a")
+
+    with c2:
+        st.session_state["cm_base2_name"] = st.text_input("Nome da Base 2", st.session_state["cm_base2_name"])
+        up_b = st.file_uploader("Arquivo da Base 2", type=["xlsx", "xls", "csv"], key="cm_up_b")
+
+    if not up_a or not up_b:
+        st.info("Carregue as duas bases para continuar.")
+        return
+
+    analysis_name = st.session_state["cm_analysis_name"]
+    base1_name = st.session_state["cm_base1_name"]
+    base2_name = st.session_state["cm_base2_name"]
+
+    with st.spinner("Carregando bases..."):
+        df_a = _read_file_cached(up_a.getvalue(), up_a.name)
+        df_b = _read_file_cached(up_b.getvalue(), up_b.name)
+
+    cols_a = _get_column_list(tuple(df_a.columns))
+    cols_b = _get_column_list(tuple(df_b.columns))
+
+    st.subheader("2) Chave da conciliação")
+    st.caption("Selecione os campos que o sistema deve usar para identificar o mesmo registro nas duas bases. O tipo de dado é sugerido automaticamente e o formato no relatório pode ser ajustado quando necessário.")
+    _render_header_row(["Campo da Base 1", "Campo da Base 2", "Nome exibido", "Tipo de dado", "Formato no relatório"])
+
+    for i, row in enumerate(st.session_state["cm_key_rows"]):
+        st.session_state["cm_key_rows"][i] = _render_pair_line(
+            df_a, df_b, cols_a, cols_b, row, i, prefix="cm_key", is_value=False
+        )
+
+    if st.button("Adicionar campo à chave da conciliação"):
+        st.session_state["cm_key_rows"].append({
+            "a": "", "b": "", "label": "",
+            "semantic_type": "",
+            "excel_format": "",
+            "fmt_manual": False,
+            "last_signature": "",
+        })
+        st.rerun()
+
+    st.subheader("3) Campos para comparação")
+    st.caption("Selecione os campos cujos valores devem ser comparados entre as bases. O tipo de dado é sugerido automaticamente e o formato no relatório pode ser ajustado quando necessário.")
+    _render_header_row(["Campo da Base 1", "Campo da Base 2", "Nome exibido", "Tipo de dado", "Formato no relatório"])
+
+    for i, row in enumerate(st.session_state["cm_val_rows"]):
+        st.session_state["cm_val_rows"][i] = _render_pair_line(
+            df_a, df_b, cols_a, cols_b, row, i, prefix="cm_val", is_value=True
+        )
+
+    if st.button("Adicionar campo para comparação"):
+        st.session_state["cm_val_rows"].append({
+            "a": "", "b": "", "label": "",
+            "semantic_type": "",
+            "excel_format": "",
+            "fmt_manual": False,
+            "last_signature": "",
+        })
+        st.rerun()
+
+    st.subheader("4) Configuração do resumo")
+    gerar_exec = st.checkbox("Gerar resumo executivo", value=True)
+
+    valid_keys = [r for r in st.session_state["cm_key_rows"] if r.get("a") and r.get("b")]
+    valid_vals = [r for r in st.session_state["cm_val_rows"] if r.get("a") and r.get("b")]
+
+    default_group = [r.get("label") or _friendly_label(r.get("a", ""), r.get("b", "")) for r in valid_keys]
+    default_total = [r.get("label") or _friendly_label(r.get("a", ""), r.get("b", "")) for r in valid_vals]
+
+    g1, g2 = st.columns(2)
+    with g1:
+        group_labels = st.multiselect(
+            "Agrupar resumo por",
+            options=default_group,
+            default=default_group[:1] if default_group else []
+        ) if gerar_exec else []
+    with g2:
+        total_labels = st.multiselect(
+            "O que deseja totalizar/confrontar",
+            options=default_total,
+            default=default_total
+        ) if gerar_exec else []
+
+    st.subheader("5) Processar conciliação")
+    executar = st.button("Processar conciliação")
+
+    if executar:
+        if not valid_keys:
+            st.error("Informe pelo menos um campo válido na chave da conciliação.")
+            return
+
+        if not valid_vals:
+            st.error("Informe pelo menos um campo válido para comparação.")
+            return
+
+        for r in valid_keys:
+            if not r.get("label"):
+                r["label"] = _friendly_label(r["a"], r["b"])
+
+        for r in valid_vals:
+            if not r.get("label"):
+                r["label"] = _friendly_label(r["a"], r["b"])
+
+        _reset_logs()
+        progress = st.progress(0, text="Iniciando processamento...")
+        with st.spinner("Processando conciliação..."):
+            t0 = time.perf_counter()
+
+            _log_event("Lendo configurações da análise")
+            progress.progress(10, text="Preparando comparação...")
+
+            results = _run_reconciliation(df_a, df_b, valid_keys, valid_vals, base1_name, base2_name)
+            _log_event("Conciliação das bases concluída")
+            progress.progress(40, text="Montando resumo executivo...")
+
+            exec_df, detail_df, ponte_df = _build_executive_and_detail(
+                results,
+                group_labels,
+                total_labels or default_total,
+                base1_name,
+                base2_name,
+            )
+            _log_event("Resumo executivo e detalhe das diferenças gerados")
+            progress.progress(65, text="Preparando formatos de saída...")
+
+            output_semantics = _build_output_semantic_maps(
+                key_pairs=valid_keys,
+                value_pairs=valid_vals,
+                group_labels=group_labels if group_labels else [valid_keys[0]["label"]],
+                base1_name=base1_name,
+                base2_name=base2_name,
+            )
+
+            progress.progress(80, text="Gerando arquivo Excel...")
+            excel = _export_excel(
+                results,
+                exec_df,
+                detail_df,
+                ponte_df,
+                output_semantics,
+                base1_name,
+                base2_name,
+                analysis_name=analysis_name,
+            )
+
+            elapsed = time.perf_counter() - t0
+            _log_event(f"Processamento concluído em {elapsed:.2f}s")
+            progress.progress(100, text="Conciliação concluída")
+
+        st.success(f"Conciliação concluída em {elapsed:.2f}s.")
+        st.caption(f"Análise: {analysis_name}")
+        _show_logs()
+        st.markdown("**Resumo da conciliação**")
+        st.dataframe(results["resumo_global"], use_container_width=True)
+
+        if gerar_exec:
+            st.markdown("**Resumo executivo**")
+            st.dataframe(exec_df, use_container_width=True)
+            st.markdown("**Ponte da conciliação**")
+            st.dataframe(ponte_df, use_container_width=True)
+
+        st.markdown("**Detalhe das diferenças**")
+        st.dataframe(detail_df.head(200), use_container_width=True)
+
+        st.download_button(
+            "Baixar Excel da análise",
+            data=excel,
+            file_name=f"Central_Conciliacoes_{analysis_name.replace(' ', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+if __name__ == "__main__":
+    main()
