@@ -350,8 +350,22 @@ def _init_state():
     defaults = {
         "cm_base1_name": "Base 1",
         "cm_base2_name": "Base 2",
-        "cm_key_rows": [{"a": "", "b": "", "label": "", "semantic_type": "texto", "excel_format": ""}],
-        "cm_val_rows": [{"a": "", "b": "", "label": "", "semantic_type": "moeda", "excel_format": 'R$ #,##0.00'}],
+        "cm_key_rows": [{
+            "a": "", "b": "", "label": "",
+            "semantic_type": "",
+            "excel_format": "",
+            "type_manual": False,
+            "fmt_manual": False,
+            "last_signature": "",
+        }],
+        "cm_val_rows": [{
+            "a": "", "b": "", "label": "",
+            "semantic_type": "",
+            "excel_format": "",
+            "type_manual": False,
+            "fmt_manual": False,
+            "last_signature": "",
+        }],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1015,6 +1029,13 @@ def _export_excel(
 # UI helpers
 # ============================================================
 
+def _render_header_row(labels: List[str]):
+    cols = st.columns([1.15, 1.15, 0.9, 0.7, 0.9])
+    for col, label in zip(cols, labels):
+        with col:
+            st.markdown(f"**{label}**")
+
+
 def _render_pair_line(df_a, df_b, cols_a, cols_b, row, idx, prefix: str, is_value: bool = False):
     cols = st.columns([1.15, 1.15, 0.9, 0.7, 0.9])
 
@@ -1038,8 +1059,28 @@ def _render_pair_line(df_a, df_b, cols_a, cols_b, row, idx, prefix: str, is_valu
 
     inferred = _suggest_pair_semantics(df_a, df_b, a_col, b_col, prefer_value=is_value)
     default_label = row.get("label") or _friendly_label(a_col, b_col)
-    current_type = row.get("semantic_type") or inferred["tipo_logico"]
-    current_format = row.get("excel_format") or inferred["formato_excel"]
+
+    signature = f"{a_col}||{b_col}"
+    last_signature = row.get("last_signature", "")
+    type_manual = bool(row.get("type_manual", False))
+    fmt_manual = bool(row.get("fmt_manual", False))
+
+    suggested_by_type = {
+        "texto": "",
+        "data": "dd/mm/yyyy",
+        "numero": "0.00",
+        "moeda": "R$ #,##0.00",
+        "percentual": "0.00%",
+    }
+
+    if signature != last_signature:
+        current_type = inferred["tipo_logico"]
+        current_format = suggested_by_type.get(current_type, "")
+        type_manual = False
+        fmt_manual = False
+    else:
+        current_type = row.get("semantic_type") or inferred["tipo_logico"]
+        current_format = row.get("excel_format", "") or suggested_by_type.get(current_type, "")
 
     with cols[2]:
         label = st.text_input(
@@ -1050,7 +1091,7 @@ def _render_pair_line(df_a, df_b, cols_a, cols_b, row, idx, prefix: str, is_valu
         )
 
     with cols[3]:
-        semantic_type = st.selectbox(
+        selected_type = st.selectbox(
             f"Tipo lógico #{idx+1}",
             options=SEMANTIC_TYPES,
             index=SEMANTIC_TYPES.index(current_type) if current_type in SEMANTIC_TYPES else 0,
@@ -1058,34 +1099,45 @@ def _render_pair_line(df_a, df_b, cols_a, cols_b, row, idx, prefix: str, is_valu
             label_visibility="collapsed",
         )
 
-    suggested_format = _excel_format_by_semantic_type(
-        semantic_type,
-        2 if semantic_type in ["moeda", "numero", "percentual"] else 0
-    )
-    final_format_default = current_format if _clean_text(current_format) else suggested_format
+    if selected_type != current_type:
+        type_manual = True
+        current_type = selected_type
+        if not fmt_manual:
+            current_format = suggested_by_type.get(current_type, "")
+
+    format_disabled = current_type == "texto"
+
+    if current_type == "texto":
+        current_format = ""
+        fmt_manual = False
+
+    fmt_key = f"{prefix}_fmt_{idx}_{current_type}"
 
     with cols[4]:
         excel_format = st.text_input(
             f"Formato Excel #{idx+1}",
-            value=final_format_default,
-            key=f"{prefix}_fmt_{idx}",
+            value=current_format,
+            key=fmt_key,
             label_visibility="collapsed",
+            disabled=format_disabled,
         )
+
+    if current_type == "texto":
+        excel_format = ""
+        fmt_manual = False
+    else:
+        fmt_manual = excel_format != suggested_by_type.get(current_type, "")
 
     return {
         "a": a_col,
         "b": b_col,
         "label": label,
-        "semantic_type": semantic_type,
+        "semantic_type": current_type,
         "excel_format": excel_format,
+        "type_manual": type_manual,
+        "fmt_manual": fmt_manual,
+        "last_signature": signature,
     }
-
-
-def _render_header_row(labels: List[str]):
-    cols = st.columns([1.15, 1.15, 0.9, 0.7, 0.9])
-    for col, label in zip(cols, labels):
-        with col:
-            st.markdown(f"**{label}**")
 
 
 # ============================================================
@@ -1134,7 +1186,14 @@ def main():
         )
 
     if st.button("Adicionar par-chave"):
-        st.session_state["cm_key_rows"].append({"a": "", "b": "", "label": "", "semantic_type": "texto", "excel_format": ""})
+        st.session_state["cm_key_rows"].append({
+            "a": "", "b": "", "label": "",
+            "semantic_type": "",
+            "excel_format": "",
+            "type_manual": False,
+            "fmt_manual": False,
+            "last_signature": "",
+        })
         st.rerun()
 
     st.subheader("3) Quais campos deseja confrontar para validar")
@@ -1147,7 +1206,14 @@ def main():
         )
 
     if st.button("Adicionar campo de valor"):
-        st.session_state["cm_val_rows"].append({"a": "", "b": "", "label": "", "semantic_type": "moeda", "excel_format": 'R$ #,##0.00'})
+        st.session_state["cm_val_rows"].append({
+            "a": "", "b": "", "label": "",
+            "semantic_type": "",
+            "excel_format": "",
+            "type_manual": False,
+            "fmt_manual": False,
+            "last_signature": "",
+        })
         st.rerun()
 
     st.subheader("4) Como deseja receber o resultado?")
