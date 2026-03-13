@@ -1,8 +1,6 @@
 import streamlit as st
 from pathlib import Path
 
-st.set_page_config(page_title="Central de Conciliações", layout="wide")
-
 BASE_DIR = Path(__file__).resolve().parent
 
 
@@ -11,6 +9,17 @@ def _run_child(module_path: Path):
     code = compile(module_path.read_text(encoding="utf-8"), str(module_path), "exec")
     exec(code, namespace)
 
+    if "run" in namespace and callable(namespace["run"]):
+        namespace["run"]()
+    else:
+        st.error(f"O módulo {module_path.name} não possui uma função run().")
+
+
+st.set_page_config(
+    page_title="Central de Conciliações",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 with st.sidebar:
     st.markdown("# Central de Conciliações")
@@ -20,7 +29,9 @@ with st.sidebar:
         index=0,
     )
     st.markdown("---")
-    st.caption("A plataforma agora foi separada em visões distintas, preservando a lógica específica de cada conciliação.")
+    st.caption(
+        "A plataforma foi separada em visões distintas, preservando a lógica específica de cada conciliação."
+    )
 
 if visao == "Análise de Bases":
     _run_child(BASE_DIR / "modulo_analise_bases.py")
