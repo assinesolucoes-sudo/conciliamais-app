@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Central de Análises - Consistência entre Bases V31", layout="wide")
+st.set_page_config(page_title="Central de Conciliações - Análise de Consistência entre Bases V34", layout="wide")
 
 
 # ============================================================
@@ -78,135 +78,96 @@ def _to_number(sr) -> pd.Series:
 def _friendly_label(a: str, b: str) -> str:
     na = _norm_name(a)
     nb = _norm_name(b)
-    joined = f"{na} {nb}"
-    mapping = [
-        ("filial", "Filial"),
-        ("patrimonio", "Patrimônio"),
-        ("plaqueta", "Plaqueta"),
-        ("conta", "Conta Contábil"),
-        ("saldo", "Saldo"),
-        ("aquisicao", "Aquisição"),
-        ("depreciacao", "Depreciação"),
-        ("grupo patrimonio", "Grupo Patrimônio"),
-        ("nome bem", "Nome Bem"),
-        ("centro custo", "Centro de Custo"),
-        ("ccusto", "Centro de Custo"),
-        ("fornecedor", "Fornecedor"),
-        ("cliente", "Cliente"),
-        ("produto", "Produto"),
-        ("documento", "Documento"),
-        ("data", "Data"),
-        ("percentual", "Percentual"),
-        ("aliquota", "Alíquota"),
-        ("quantidade", "Quantidade"),
-    ]
-    for key, label in mapping:
-        if key in joined:
-            return label
-    if _clean_text(a) == _clean_text(b) and _clean_text(a):
-        return _clean_text(a)
-    return f"{_clean_text(a)} ↔ {_clean_text(b)}"
-
-
-def _top_reason_from_df(df: pd.DataFrame) -> str:
-    if df.empty or "MOTIVO" not in df.columns:
+    if not na and not nb:
         return ""
-    s = df["MOTIVO"].dropna().astype(str).map(_clean_text)
-    s = s[s.ne("") & s.ne("Conciliado")]
-    if s.empty:
-        return ""
-    return s.value_counts().index[0]
+    if na == nb:
+        return _clean_text(a) or _clean_text(b)
+
+    tokens_a = na.split()
+    tokens_b = nb.split()
+
+    if tokens_a and tokens_b:
+        if set(tokens_a).issubset(set(tokens_b)):
+            return _clean_text(a)
+        if set(tokens_b).issubset(set(tokens_a)):
+            return _clean_text(b)
+
+    inter = [t for t in tokens_a if t in tokens_b]
+    if inter:
+        return " ".join(w.capitalize() for w in inter)
+
+    return _clean_text(a) or _clean_text(b)
 
 
-def _unique_preserve_order(items: List[str]) -> List[str]:
+def _unique_preserve_order(values: List[str]) -> List[str]:
     seen = set()
     out = []
-    for x in items:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
+    for v in values:
+        if v not in seen:
+            out.append(v)
+            seen.add(v)
     return out
 
 
-def _build_hash_key_from_cols(df: pd.DataFrame, cols: List[str]) -> pd.Series:
-    if not cols:
-        return pd.Series([0] * len(df), index=df.index, dtype="uint64")
-    return pd.util.hash_pandas_object(df[cols], index=False).astype("uint64")
+def _parse_date_series(sr) -> pd.Series:
+    if isinstance(sr, pd.DataFrame):
+        if sr.shape[1] == 0:
+            return pd.Series([pd.NaT] * len(sr), index=sr.index)
+        sr = sr.iloc[:, 0]
+
+    s = _to_text(sr)
+    if s.empty:
+        return pd.to_datetime(s, errors="coerce")
+
+    parsed = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    if parsed.notna().mean() >= 0.6:
+        return parsed
+
+    parsed = pd.to_datetime(s, errors="coerce", dayfirst=False)
+    return parsed
 
 
-def _safe_get_series(df: pd.DataFrame, col_name: str, default_text: bool = True) -> pd.Series:
-    if col_name not in df.columns:
-        if default_text:
-            return pd.Series([""] * len(df), index=df.index)
-        return pd.Series([0.0] * len(df), index=df.index)
-
-    obj = df[col_name]
-
-    if isinstance(obj, pd.DataFrame):
-        if obj.shape[1] == 0:
-            if default_text:
-                return pd.Series([""] * len(df), index=df.index)
-            return pd.Series([0.0] * len(df), index=df.index)
-        return obj.iloc[:, 0]
-
-    return obj
-
-
-# ============================================================
-# Semântica
-# ============================================================
-
-def _sample_non_null(sr: pd.Series, n: int = 30) -> pd.Series:
-    sr = _to_text(sr)
-    sr = sr[sr.ne("")]
-    return sr.head(n)
-
-
-def _looks_like_date(sr: pd.Series) -> bool:
-    sample = _sample_non_null(sr)
-    if sample.empty:
-        return False
-    parsed = pd.to_datetime(sample, errors="coerce", dayfirst=True)
-    return parsed.notna().mean() >= 0.7
-
-
-def _looks_like_number(sr: pd.Series) -> bool:
-    sample = _sample_non_null(sr)
-    if sample.empty:
-        return False
-    raw = sample.astype(str)
-    normalized = raw.str.replace(r"\s", "", regex=True)
-    normalized = normalized.str.replace("%", "", regex=False)
-    ok = normalized.str.match(r"^-?[\d\.\,]+$", na=False)
-    return ok.mean() >= 0.7
+def _sample_non_null(sr, n: int = 80) -> pd.Series:
+    s = pd.Series(sr)
+    s = s[pd.notna(s)]
+    if s.empty:
+        return s
+    return s.head(n)
 
 
 def _infer_semantic_type(col_name: str, sr: pd.Series, prefer_value: bool = False) -> str:
-    name = _norm_name(col_name)
+    col_norm = _norm_name(col_name)
+    s = _sample_non_null(sr)
 
-    if any(k in name for k in ["percentual", "aliquota", "aliq", "perc", "taxa", "%"]):
+    if s.empty:
+        return "numero" if prefer_value else "texto"
+
+    name_has_date = any(k in col_norm for k in ["data", "dt", "emissao", "venc", "nasc", "date"])
+    parsed_date = _parse_date_series(s)
+    if name_has_date or parsed_date.notna().mean() >= 0.8:
+        return "data"
+
+    txt = _to_text(s)
+    if txt.str.contains("%", regex=False).mean() >= 0.4:
         return "percentual"
 
-    if any(k in name for k in ["valor", "saldo", "total", "debito", "credito", "montante", "preco", "vlr", "vl "]):
-        return "moeda"
-
-    if any(k in name for k in ["qtd", "quantidade", "qtde", "itens", "numero de", "num itens"]):
-        return "numero"
-
-    if any(k in name for k in ["data", "dt ", "dt_", "emissao", "vencimento", "baixa", "aquisicao"]):
-        return "data"
-
-    if _looks_like_date(sr):
-        return "data"
-
-    if _looks_like_number(sr):
-        sample = _sample_non_null(sr)
-        if not sample.empty and sample.str.contains("%", regex=False).mean() >= 0.3:
-            return "percentual"
-        if prefer_value:
+    num = _to_number(s)
+    numeric_ratio = pd.to_numeric(num, errors="coerce").notna().mean()
+    if numeric_ratio >= 0.8:
+        if any(k in col_norm for k in [
+            "valor", "vlr", "preco", "preço", "saldo", "montante", "debito", "débito",
+            "credito", "crédito", "total", "custo", "receita", "despesa", "liq", "líq",
+            "bruto", "acumul", "aquisi", "deprec", "mensal"
+        ]):
             return "moeda"
+        if prefer_value:
+            if (num.abs() >= 1000).mean() >= 0.3:
+                return "moeda"
+            return "numero"
         return "numero"
 
+    if prefer_value:
+        return "numero"
     return "texto"
 
 
@@ -343,13 +304,37 @@ def _get_column_list(columns: Tuple[str, ...]) -> List[str]:
 
 
 # ============================================================
+# Logs
+# ============================================================
+
+def _reset_logs():
+    st.session_state["cm_logs"] = []
+
+
+def _log_event(msg: str):
+    if "cm_logs" not in st.session_state:
+        st.session_state["cm_logs"] = []
+    st.session_state["cm_logs"].append(f"{pd.Timestamp.now().strftime('%H:%M:%S')} - {msg}")
+
+
+def _show_logs():
+    logs = st.session_state.get("cm_logs", [])
+    if logs:
+        with st.expander("Log da execução", expanded=False):
+            for item in logs:
+                st.write(item)
+
+
+# ============================================================
 # Estado
 # ============================================================
 
 def _init_state():
     defaults = {
+        "cm_analysis_name": "Nova análise",
         "cm_base1_name": "Base 1",
         "cm_base2_name": "Base 2",
+        "cm_logs": [],
         "cm_key_rows": [{
             "a": "", "b": "", "label": "",
             "semantic_type": "",
@@ -373,7 +358,7 @@ def _init_state():
 
 
 # ============================================================
-# Motor de conciliação
+# Engine principal
 # ============================================================
 
 def _run_reconciliation(
@@ -383,759 +368,397 @@ def _run_reconciliation(
     value_pairs: List[dict],
     base1_name: str,
     base2_name: str,
-) -> Dict[str, pd.DataFrame]:
-    a = _prepare_base_for_matching(df_a, key_pairs, value_pairs, side="A")
-    b = _prepare_base_for_matching(df_b, key_pairs, value_pairs, side="B")
+) -> dict:
+    labels_keys = [kp["label"] for kp in key_pairs]
+    labels_vals = [vp["label"] for vp in value_pairs]
 
-    key_labels = [kp["label"] for kp in key_pairs]
-    value_labels = [vp["label"] for vp in value_pairs]
+    A = _prepare_base_for_matching(df_a, key_pairs, value_pairs, side="A")
+    B = _prepare_base_for_matching(df_b, key_pairs, value_pairs, side="B")
 
-    key_cols = [f"KEY::{lbl}" for lbl in key_labels]
+    key_cols = [f"KEY::{lbl}" for lbl in labels_keys]
+    val_cols = [f"NUM::{lbl}" for lbl in labels_vals]
 
-    a["__MATCH_KEY__"] = _build_hash_key_from_cols(a, key_cols)
-    b["__MATCH_KEY__"] = _build_hash_key_from_cols(b, key_cols)
+    if key_cols:
+        A["__KEY__"] = A[key_cols].astype(str).agg("|".join, axis=1)
+        B["__KEY__"] = B[key_cols].astype(str).agg("|".join, axis=1)
+    else:
+        A["__KEY__"] = ""
+        B["__KEY__"] = ""
 
-    a["__OCC__"] = a.groupby("__MATCH_KEY__", sort=False).cumcount() + 1
-    b["__OCC__"] = b.groupby("__MATCH_KEY__", sort=False).cumcount() + 1
+    dup_a = A.groupby("__KEY__", dropna=False).size().rename("QTD_DUP_A").reset_index()
+    dup_b = B.groupby("__KEY__", dropna=False).size().rename("QTD_DUP_B").reset_index()
 
-    merged = a.merge(
-        b,
-        on=["__MATCH_KEY__", "__OCC__"],
-        how="outer",
-        suffixes=("_A", "_B"),
-        indicator=True,
-        sort=False,
-        copy=False,
-    )
+    agg_map = {c: "sum" for c in val_cols}
+    for c in key_cols:
+        agg_map[c] = "first"
 
-    for kp in key_pairs:
-        label = kp["label"]
-        a_raw = f"{kp['a']}_A" if f"{kp['a']}_A" in merged.columns else kp["a"]
-        b_raw = f"{kp['b']}_B" if f"{kp['b']}_B" in merged.columns else kp["b"]
+    A1 = A.groupby("__KEY__", dropna=False, as_index=False).agg(agg_map)
+    B1 = B.groupby("__KEY__", dropna=False, as_index=False).agg(agg_map)
 
-        s = _to_text(_safe_get_series(merged, a_raw, default_text=True))
-        sb = _to_text(_safe_get_series(merged, b_raw, default_text=True))
-        s = s.where(s.ne(""), sb)
+    full = A1.merge(B1, on="__KEY__", how="outer", suffixes=(f"_{base1_name}", f"_{base2_name}"), indicator=True)
+    full = full.merge(dup_a, on="__KEY__", how="left").merge(dup_b, on="__KEY__", how="left")
+    full["QTD_DUP_A"] = full["QTD_DUP_A"].fillna(0).astype(int)
+    full["QTD_DUP_B"] = full["QTD_DUP_B"].fillna(0).astype(int)
 
-        merged[f"DIM::{label}"] = s
+    for lbl in labels_keys:
+        ca = f"KEY::{lbl}_{base1_name}"
+        cb = f"KEY::{lbl}_{base2_name}"
+        if ca not in full.columns and cb in full.columns:
+            full[ca] = full[cb]
+        if cb not in full.columns and ca in full.columns:
+            full[cb] = full[ca]
+        full[lbl] = full[ca].fillna(full[cb]).fillna("")
 
-    for vp in value_pairs:
-        lbl = vp["label"]
+    for lbl in labels_vals:
+        ca = f"NUM::{lbl}_{base1_name}"
+        cb = f"NUM::{lbl}_{base2_name}"
+        if ca not in full.columns:
+            full[ca] = 0.0
+        if cb not in full.columns:
+            full[cb] = 0.0
+        full[f"DIF::{lbl}"] = (pd.to_numeric(full[ca], errors="coerce").fillna(0.0) - pd.to_numeric(full[cb], errors="coerce").fillna(0.0)).round(6)
 
-        a_num = f"NUM::{lbl}_A" if f"NUM::{lbl}_A" in merged.columns else f"NUM::{lbl}"
-        b_num = f"NUM::{lbl}_B" if f"NUM::{lbl}_B" in merged.columns else f"NUM::{lbl}"
+    def classificar_origem(x):
+        if x == "left_only":
+            return f"Somente {base1_name}"
+        if x == "right_only":
+            return f"Somente {base2_name}"
+        return "Ambos"
 
-        aval = _to_number(_safe_get_series(merged, a_num, default_text=False)).round(6)
-        bval = _to_number(_safe_get_series(merged, b_num, default_text=False)).round(6)
+    full["ORIGEM"] = full["_merge"].map(classificar_origem)
 
-        merged[f"VALOR::{lbl}::{base1_name}"] = aval
-        merged[f"VALOR::{lbl}::{base2_name}"] = bval
-        merged[f"DIF::{lbl}"] = (aval - bval).round(6)
+    diff_matrix = pd.DataFrame({lbl: full[f"DIF::{lbl}"].abs() > 0.0000001 for lbl in labels_vals}) if labels_vals else pd.DataFrame(index=full.index)
+    full["TEM_DIF_VALOR"] = diff_matrix.any(axis=1) if not diff_matrix.empty else False
+    full["EM_DUPLICIDADE"] = (full["QTD_DUP_A"] > 1) | (full["QTD_DUP_B"] > 1)
 
-    merged["PRESENCA"] = merged["_merge"].map(
-        {
-            "both": "Em ambas",
-            "left_only": f"Somente {base1_name}",
-            "right_only": f"Somente {base2_name}",
-        }
-    )
-
-    dup_a = a.groupby("__MATCH_KEY__", sort=False).size().rename("QTD_A")
-    dup_b = b.groupby("__MATCH_KEY__", sort=False).size().rename("QTD_B")
-    dup = (
-        dup_a.to_frame()
-        .join(dup_b, how="outer")
-        .fillna(0)
-        .astype(int)
-        .reset_index()
-    )
-    dup["DUPLICIDADE"] = np.where((dup["QTD_A"] > 1) | (dup["QTD_B"] > 1), 1, 0)
-
-    merged = merged.merge(
-        dup[["__MATCH_KEY__", "QTD_A", "QTD_B", "DUPLICIDADE"]],
-        on="__MATCH_KEY__",
-        how="left",
-        sort=False,
-        copy=False,
-    )
-
-    merged["QTD_A"] = merged["QTD_A"].fillna(0).astype(int)
-    merged["QTD_B"] = merged["QTD_B"].fillna(0).astype(int)
-    merged["DUPLICIDADE"] = merged["DUPLICIDADE"].fillna(0).astype(int)
-
-    any_diff = pd.Series(0.0, index=merged.index)
-    for lbl in value_labels:
-        any_diff = any_diff.add(merged[f"DIF::{lbl}"].abs(), fill_value=0.0)
-
-    merged["MOTIVO"] = np.select(
+    full["STATUS"] = np.select(
         [
-            merged["PRESENCA"].eq(f"Somente {base1_name}"),
-            merged["PRESENCA"].eq(f"Somente {base2_name}"),
-            merged["DUPLICIDADE"].eq(1),
-            any_diff.gt(0.0001),
+            full["EM_DUPLICIDADE"],
+            full["_merge"].eq("left_only"),
+            full["_merge"].eq("right_only"),
+            full["TEM_DIF_VALOR"],
         ],
         [
+            "Duplicidade",
             f"Chave só na {base1_name}",
             f"Chave só na {base2_name}",
-            "Duplicidade",
-            f"Valor divergente entre {base1_name} e {base2_name}",
+            "Valor divergente",
         ],
         default="Conciliado",
     )
 
-    resumo_global_rows = []
-    for lbl in value_labels:
-        total_a = float(merged[f"VALOR::{lbl}::{base1_name}"].sum())
-        total_b = float(merged[f"VALOR::{lbl}::{base2_name}"].sum())
-        resumo_global_rows.append(
-            {
-                "Campo confrontado": lbl,
-                f"Total {base1_name}": total_a,
-                f"Total {base2_name}": total_b,
-                "Diferença total": total_a - total_b,
-            }
-        )
-
-    resumo_global = pd.DataFrame(resumo_global_rows)
+    rows = []
+    for lbl in labels_vals:
+        total_a = pd.to_numeric(full[f"NUM::{lbl}_{base1_name}"], errors="coerce").fillna(0.0).sum()
+        total_b = pd.to_numeric(full[f"NUM::{lbl}_{base2_name}"], errors="coerce").fillna(0.0).sum()
+        rows.append({
+            "Campo confrontado": lbl,
+            f"Total {base1_name}": round(total_a, 2),
+            f"Total {base2_name}": round(total_b, 2),
+            "Diferença total": round(total_a - total_b, 2),
+        })
+    resumo_global = pd.DataFrame(rows)
 
     return {
-        "full": merged,
+        "full": full,
         "resumo_global": resumo_global,
-        "value_labels": value_labels,
-        "key_labels": key_labels,
+        "key_labels": labels_keys,
+        "value_labels": labels_vals,
+        "base1_name": base1_name,
+        "base2_name": base2_name,
     }
 
 
-def _build_executive_and_detail(
-    results: Dict[str, pd.DataFrame],
-    group_labels: List[str],
-    value_labels: List[str],
-    base1_name: str,
-    base2_name: str,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    df = results["full"].copy()
+# ============================================================
+# Resumo executivo e detalhe
+# ============================================================
+
+def _build_executive_and_detail(results: dict, group_labels: List[str], total_labels: List[str], base1_name: str, base2_name: str):
+    full = results["full"].copy()
+    value_labels = results["value_labels"]
 
     if not group_labels:
-        group_labels = results["key_labels"][:1] if results["key_labels"] else ["MOTIVO"]
+        full["Agrupador"] = "TOTAL GERAL"
+    else:
+        full["Agrupador"] = full[group_labels].astype(str).agg(" | ".join, axis=1)
+        full.loc[full["Agrupador"].str.strip().eq(""), "Agrupador"] = "TOTAL GERAL"
 
-    group_cols = []
-    for lbl in group_labels:
-        col = f"DIM::{lbl}" if f"DIM::{lbl}" in df.columns else lbl
-        if col in df.columns:
-            group_cols.append(col)
+    comps = []
+    for label in total_labels:
+        if label not in value_labels:
+            continue
+        dif_col = f"DIF::{label}"
+        tmp = full.groupby("Agrupador", dropna=False)[dif_col].sum().reset_index()
+        tmp["Campo confrontado"] = label
+        tmp["Componente"] = np.where(
+            tmp[dif_col].abs() <= 0.0000001,
+            "Sem diferença",
+            np.where(tmp[dif_col] > 0, f"Valor divergente entre {base1_name} e {base2_name}", f"Valor divergente entre {base1_name} e {base2_name}"),
+        )
+        tmp = tmp.rename(columns={dif_col: "Valor"})
+        comps.append(tmp[["Agrupador", "Campo confrontado", "Componente", "Valor"]])
 
-    if not group_cols:
-        df["DIM::Resumo"] = "Resumo Geral"
-        group_cols = ["DIM::Resumo"]
+    ponte = pd.concat(comps, ignore_index=True) if comps else pd.DataFrame(columns=["Agrupador", "Campo confrontado", "Componente", "Valor"])
 
-    agg_map = {}
+    exclusivos_a = full[full["STATUS"].eq(f"Chave só na {base1_name}")]
+    exclusivos_b = full[full["STATUS"].eq(f"Chave só na {base2_name}")]
+    duplicados = full[full["STATUS"].eq("Duplicidade")]
+
+    extras = []
+    if not exclusivos_a.empty:
+        x = exclusivos_a.groupby("Agrupador", dropna=False).size().reset_index(name="Valor")
+        x["Campo confrontado"] = total_labels[0] if total_labels else ""
+        x["Componente"] = f"Chave só na {base1_name}"
+        extras.append(x[["Agrupador", "Campo confrontado", "Componente", "Valor"]])
+    if not exclusivos_b.empty:
+        x = exclusivos_b.groupby("Agrupador", dropna=False).size().reset_index(name="Valor")
+        x["Campo confrontado"] = total_labels[0] if total_labels else ""
+        x["Componente"] = f"Chave só na {base2_name}"
+        extras.append(x[["Agrupador", "Campo confrontado", "Componente", "Valor"]])
+    if not duplicados.empty:
+        x = duplicados.groupby("Agrupador", dropna=False).size().reset_index(name="Valor")
+        x["Campo confrontado"] = total_labels[0] if total_labels else ""
+        x["Componente"] = "Duplicidade"
+        extras.append(x[["Agrupador", "Campo confrontado", "Componente", "Valor"]])
+
+    if extras:
+        ponte = pd.concat([ponte] + extras, ignore_index=True)
+
+    detalhe_cols = ["STATUS", "ORIGEM", "Agrupador"] + results["key_labels"]
     for lbl in value_labels:
-        agg_map[f"VALOR::{lbl}::{base1_name}"] = "sum"
-        agg_map[f"VALOR::{lbl}::{base2_name}"] = "sum"
-        agg_map[f"DIF::{lbl}"] = "sum"
-
-    exec_df = df.groupby(group_cols, dropna=False).agg(agg_map).reset_index()
-
-    motive = (
-        df[df["MOTIVO"].ne("Conciliado")]
-        .groupby(group_cols, dropna=False)
-        .apply(_top_reason_from_df)
-        .reset_index(name="Motivo predominante da diferença")
-    )
-
-    exec_df = exec_df.merge(motive, on=group_cols, how="left")
-    exec_df["Motivo predominante da diferença"] = exec_df["Motivo predominante da diferença"].fillna("")
-
-    rename_map = {c: c.replace("DIM::", "") for c in group_cols}
-    for lbl in value_labels:
-        rename_map[f"VALOR::{lbl}::{base1_name}"] = f"{lbl} {base1_name}"
-        rename_map[f"VALOR::{lbl}::{base2_name}"] = f"{lbl} {base2_name}"
-        rename_map[f"DIF::{lbl}"] = f"Diferença {lbl}"
-
-    exec_df = exec_df.rename(columns=rename_map)
-
-    ponte_rows = []
-    for lbl in value_labels:
-        ponte_rows.append(
-            {
-                "Agrupador": "TOTAL GERAL",
-                "Campo confrontado": lbl,
-                "Componente": f"Chave só na {base1_name}",
-                "Valor": float(df.loc[df["MOTIVO"].eq(f"Chave só na {base1_name}"), f"DIF::{lbl}"].sum()),
-            }
-        )
-        ponte_rows.append(
-            {
-                "Agrupador": "TOTAL GERAL",
-                "Campo confrontado": lbl,
-                "Componente": f"Chave só na {base2_name}",
-                "Valor": float(df.loc[df["MOTIVO"].eq(f"Chave só na {base2_name}"), f"DIF::{lbl}"].sum()),
-            }
-        )
-        ponte_rows.append(
-            {
-                "Agrupador": "TOTAL GERAL",
-                "Campo confrontado": lbl,
-                "Componente": f"Valor divergente entre {base1_name} e {base2_name}",
-                "Valor": float(df.loc[df["MOTIVO"].eq(f"Valor divergente entre {base1_name} e {base2_name}"), f"DIF::{lbl}"].sum()),
-            }
-        )
-        ponte_rows.append(
-            {
-                "Agrupador": "TOTAL GERAL",
-                "Campo confrontado": lbl,
-                "Componente": "Duplicidade",
-                "Valor": float(df.loc[df["MOTIVO"].eq("Duplicidade"), f"DIF::{lbl}"].sum()),
-            }
-        )
-
-        grp = (
-            df[df["MOTIVO"].ne("Conciliado")]
-            .groupby(group_cols + ["MOTIVO"], dropna=False)[f"DIF::{lbl}"]
-            .sum()
-            .reset_index()
-        )
-
-        for _, row in grp.iterrows():
-            agrupador = " | ".join([_clean_text(row[c]) for c in group_cols])
-            ponte_rows.append(
-                {
-                    "Agrupador": agrupador,
-                    "Campo confrontado": lbl,
-                    "Componente": row["MOTIVO"],
-                    "Valor": float(row[f"DIF::{lbl}"]),
-                }
-            )
-
-    ponte_df = pd.DataFrame(ponte_rows)
-
-    detail = df[df["MOTIVO"].ne("Conciliado")].copy()
-
-    detail_cols = []
-    for lbl in results["key_labels"]:
-        col = f"DIM::{lbl}"
-        if col in detail.columns:
-            detail_cols.append(col)
-
-    value_cols = []
-    for lbl in value_labels:
-        value_cols.extend([
-            f"VALOR::{lbl}::{base1_name}",
-            f"VALOR::{lbl}::{base2_name}",
+        detalhe_cols.extend([
+            f"NUM::{lbl}_{base1_name}",
+            f"NUM::{lbl}_{base2_name}",
             f"DIF::{lbl}",
         ])
+    detalhe = full[detalhe_cols].copy()
 
-    detail = detail[detail_cols + value_cols + ["MOTIVO"]].copy()
-    detail = detail.rename(columns=rename_map)
-
+    rename_map = {
+        "STATUS": "Status",
+        "ORIGEM": "Origem",
+        "Agrupador": "Agrupador",
+    }
     for lbl in value_labels:
-        detail = detail.rename(
-            columns={
-                f"VALOR::{lbl}::{base1_name}": f"{lbl} {base1_name}",
-                f"VALOR::{lbl}::{base2_name}": f"{lbl} {base2_name}",
-                f"DIF::{lbl}": f"Diferença {lbl}",
-            }
-        )
+        rename_map[f"NUM::{lbl}_{base1_name}"] = f"{lbl} {base1_name}"
+        rename_map[f"NUM::{lbl}_{base2_name}"] = f"{lbl} {base2_name}"
+        rename_map[f"DIF::{lbl}"] = f"Diferença {lbl}"
+    detalhe = detalhe.rename(columns=rename_map)
 
-    if value_labels:
-        diff_col = f"Diferença {value_labels[0]}"
-        if diff_col in exec_df.columns:
-            exec_df = (
-                exec_df.assign(__ABS__=exec_df[diff_col].abs())
-                .sort_values("__ABS__", ascending=False)
-                .drop(columns=["__ABS__"])
-            )
-        if diff_col in detail.columns:
-            detail = (
-                detail.assign(__ABS__=detail[diff_col].abs())
-                .sort_values("__ABS__", ascending=False)
-                .drop(columns=["__ABS__"])
-            )
-
-    return exec_df, detail, ponte_df
+    resumo_exec = ponte.copy()
+    return resumo_exec, detalhe, ponte
 
 
 # ============================================================
-# Semântica de saída
+# Metadados semânticos de saída
 # ============================================================
 
-def _get_output_semantic_for_key_pair(row: dict):
-    t = row.get("semantic_type", "texto")
-    decimals = 0 if t in ["texto", "data"] else 2
-    return {
-        "tipo_logico": t,
-        "casas_decimais": decimals,
-        "formato_excel": row.get("excel_format", _excel_format_by_semantic_type(t, decimals)),
+def _build_output_semantic_maps(key_pairs: List[dict], value_pairs: List[dict], group_labels: List[str], base1_name: str, base2_name: str):
+    sem_keys = {kp["label"]: {"tipo_logico": kp.get("semantic_type", "texto"), "casas_decimais": 0, "formato_excel": kp.get("excel_format", "")} for kp in key_pairs}
+    sem_vals = {}
+    for vp in value_pairs:
+        fmt = vp.get("excel_format", "")
+        tipo = vp.get("semantic_type", "numero")
+        casas = 2
+        if tipo == "texto":
+            casas = 0
+        elif fmt and "." in fmt:
+            casas = max(fmt.count("0") - 1, 0)
+        sem_vals[vp["label"]] = {"tipo_logico": tipo, "casas_decimais": casas, "formato_excel": fmt}
+
+    detalhe_map = {
+        "Status": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
+        "Origem": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
+        "Agrupador": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
     }
+    for lbl in sem_keys:
+        detalhe_map[lbl] = sem_keys[lbl]
+    for lbl, meta in sem_vals.items():
+        detalhe_map[f"{lbl} {base1_name}"] = meta
+        detalhe_map[f"{lbl} {base2_name}"] = meta
+        detalhe_map[f"Diferença {lbl}"] = meta
 
+    resumo_global = {"Campo confrontado": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}}
+    for lbl, meta in sem_vals.items():
+        resumo_global.setdefault(f"Total {base1_name}", meta)
+        resumo_global.setdefault(f"Total {base2_name}", meta)
+        resumo_global.setdefault("Diferença total", meta)
 
-def _get_output_semantic_for_value_pair(row: dict):
-    t = row.get("semantic_type", "moeda")
-    decimals = 2 if t in ["moeda", "percentual", "numero"] else 0
-    return {
-        "tipo_logico": t,
-        "casas_decimais": decimals,
-        "formato_excel": row.get("excel_format", _excel_format_by_semantic_type(t, decimals)),
-    }
-
-
-def _build_output_semantic_maps(
-    key_pairs: List[dict],
-    value_pairs: List[dict],
-    group_labels: List[str],
-    base1_name: str,
-    base2_name: str,
-) -> Dict[str, Dict[str, dict]]:
-    key_meta = {kp["label"]: _get_output_semantic_for_key_pair(kp) for kp in key_pairs}
-    value_meta = {vp["label"]: _get_output_semantic_for_value_pair(vp) for vp in value_pairs}
-
-    resumo_exec = {}
-    detalhe = {}
-    top10 = {}
-
-    for lbl in group_labels:
-        resumo_exec[lbl] = key_meta.get(lbl, {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""})
-
-    for lbl, meta in value_meta.items():
-        resumo_exec[f"{lbl} {base1_name}"] = meta
-        resumo_exec[f"{lbl} {base2_name}"] = meta
-        resumo_exec[f"Diferença {lbl}"] = meta
-
-        detalhe[f"{lbl} {base1_name}"] = meta
-        detalhe[f"{lbl} {base2_name}"] = meta
-        detalhe[f"Diferença {lbl}"] = meta
-
-    for kp in key_pairs:
-        detalhe[kp["label"]] = key_meta.get(kp["label"], {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""})
-        top10[kp["label"]] = key_meta.get(kp["label"], {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""})
-
-    if value_pairs:
-        first_lbl = value_pairs[0]["label"]
-        top10[f"Diferença {first_lbl}"] = value_meta.get(first_lbl, {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": "0.00"})
-
-    detalhe["MOTIVO"] = {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
-    top10["MOTIVO"] = {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
-    resumo_exec["Motivo predominante da diferença"] = {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
-
-    if value_pairs:
-        main_meta = _get_output_semantic_for_value_pair(value_pairs[0])
-    else:
-        main_meta = {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": "0.00"}
-
-    ponte = {
+    resumo_exec = {
         "Agrupador": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
         "Campo confrontado": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
         "Componente": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
-        "Valor": main_meta,
+        "Valor": {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": "0.00"},
     }
 
-    resumo_global_line = {}
-    for vp in value_pairs:
-        resumo_global_line[vp["label"]] = _get_output_semantic_for_value_pair(vp)
-
-    resumo_global = {
-        "Campo confrontado": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
-        f"Total {base1_name}": main_meta,
-        f"Total {base2_name}": main_meta,
-        "Diferença total": main_meta,
-        "__linha__": resumo_global_line,
-    }
-
-    metricas = {
-        "Indicador": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
-        "Valor": {"tipo_logico": "numero", "casas_decimais": 0, "formato_excel": "0"},
-    }
+    top10 = {"Chave": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}, "Impacto": {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": "0.00"}}
 
     return {
-        "resumo_exec": resumo_exec,
-        "detalhe": detalhe,
-        "top10": top10,
-        "ponte": ponte,
+        "detalhe": detalhe_map,
         "resumo_global": resumo_global,
-        "metricas": metricas,
+        "resumo_exec": resumo_exec,
+        "top10": top10,
     }
 
 
 # ============================================================
-# Excel helpers
+# Formatação Excel
 # ============================================================
 
 def _make_xlsx_format(wb, semantic_type: str, decimals: int, is_header: bool = False, is_diff: bool = False, is_total: bool = False):
-    base = {"border": 1}
-
+    base = {
+        "border": 1,
+        "valign": "vcenter",
+    }
     if is_header:
-        base.update({"bold": True, "bg_color": "#D9EAF7", "align": "center", "valign": "vcenter"})
-        return wb.add_format(base)
-
-    if is_total:
-        base.update({"bold": True, "bg_color": "#FFF2CC"})
-
-    if semantic_type == "moeda":
-        base["num_format"] = _excel_format_by_semantic_type("moeda", decimals)
-    elif semantic_type == "percentual":
-        base["num_format"] = _excel_format_by_semantic_type("percentual", decimals)
-    elif semantic_type == "numero":
-        base["num_format"] = _excel_format_by_semantic_type("numero", decimals)
-    elif semantic_type == "data":
-        base["num_format"] = _excel_format_by_semantic_type("data", decimals)
+        base.update({"bold": True, "font_color": "#000000", "bg_color": "#D9E6F2", "align": "center"})
+    elif is_total:
+        base.update({"bold": True, "bg_color": "#F7EFD1"})
+    else:
+        base.update({"align": "left" if semantic_type == "texto" else "right"})
 
     if is_diff:
         base.update({"font_color": "#C00000", "bold": True})
 
+    num_fmt = None
+    if semantic_type == "moeda":
+        num_fmt = "R$ #,##0" + ("." + ("0" * decimals) if decimals > 0 else "")
+    elif semantic_type == "percentual":
+        num_fmt = "0" + ("." + ("0" * decimals) if decimals > 0 else "") + "%"
+    elif semantic_type == "numero":
+        num_fmt = "0" if decimals == 0 else "0." + ("0" * decimals)
+    elif semantic_type == "data":
+        num_fmt = "dd/mm/yyyy"
+    if num_fmt:
+        base["num_format"] = num_fmt
     return wb.add_format(base)
 
 
-def _get_semantic_for_output_col(col: str, semantic_map: Dict[str, dict] = None) -> dict:
-    if semantic_map and col in semantic_map:
-        return semantic_map[col]
-
-    uc = str(col).upper()
-    if "DIFERENÇA" in uc:
-        return {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": "0.00"}
-    if any(x in uc for x in ["VALOR", "TOTAL", "IMPACTO"]):
-        return {"tipo_logico": "moeda", "casas_decimais": 2, "formato_excel": "R$ #,##0.00"}
-    if uc.startswith("QTD") or uc.startswith("QTDE") or "REGISTROS" in uc or "CAMPOS CONFRONTADOS" in uc or "ITENS EM DIVERGÊNCIA" in uc:
-        return {"tipo_logico": "numero", "casas_decimais": 0, "formato_excel": "0"}
-    if "TAXA" in uc or "COBERTURA" in uc:
-        return {"tipo_logico": "percentual", "casas_decimais": 2, "formato_excel": "0.00%"}
-    return {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
+def _auto_width(df: pd.DataFrame, col_name: str, min_w: int = 12, max_w: int = 28) -> int:
+    if col_name not in df.columns:
+        return min_w
+    max_len = max([len(str(col_name))] + [len(_clean_text(v)) for v in df[col_name].head(300).astype(str).tolist()])
+    return max(min_w, min(max_len + 2, max_w))
 
 
-def _complete_semantic_map_for_df(df: pd.DataFrame, semantic_map: Dict[str, dict] = None) -> Dict[str, dict]:
-    semantic_map = dict(semantic_map or {})
-    completed = {}
+def _build_resumo_metricas(resumo_global: pd.DataFrame, detalhe: pd.DataFrame, ponte: pd.DataFrame, full: pd.DataFrame, base1_name: str, base2_name: str) -> pd.DataFrame:
+    qtd_dup = int((full["STATUS"] == "Duplicidade").sum()) if "STATUS" in full.columns else 0
+    qtd_only_a = int((full["STATUS"] == f"Chave só na {base1_name}").sum()) if "STATUS" in full.columns else 0
+    qtd_only_b = int((full["STATUS"] == f"Chave só na {base2_name}").sum()) if "STATUS" in full.columns else 0
+    qtd_div = int((full["STATUS"] == "Valor divergente").sum()) if "STATUS" in full.columns else 0
+    qtd_conc = int((full["STATUS"] == "Conciliado").sum()) if "STATUS" in full.columns else 0
 
-    for col in df.columns:
-        if col in semantic_map:
-            completed[col] = semantic_map[col]
-            continue
-
-        uc = str(col).upper()
-        nc = _norm_name(str(col))
-
-        if "diferen" in nc:
-            completed[col] = {
-                "tipo_logico": "numero",
-                "casas_decimais": 2,
-                "formato_excel": "0.00",
-            }
-        elif any(x in uc for x in ["VALOR", "TOTAL", "IMPACTO"]):
-            completed[col] = {
-                "tipo_logico": "moeda",
-                "casas_decimais": 2,
-                "formato_excel": "R$ #,##0.00",
-            }
-        elif "TAXA" in uc or "COBERTURA" in uc:
-            completed[col] = {
-                "tipo_logico": "percentual",
-                "casas_decimais": 2,
-                "formato_excel": "0.00%",
-            }
-        elif uc.startswith("QTD") or uc.startswith("QTDE") or "REGISTROS" in uc or "CAMPOS CONFRONTADOS" in uc or "ITENS EM DIVERGÊNCIA" in uc:
-            completed[col] = {
-                "tipo_logico": "numero",
-                "casas_decimais": 0,
-                "formato_excel": "0",
-            }
-        elif pd.api.types.is_numeric_dtype(df[col]):
-            completed[col] = {
-                "tipo_logico": "numero",
-                "casas_decimais": 2,
-                "formato_excel": "0.00",
-            }
-        else:
-            completed[col] = {
-                "tipo_logico": "texto",
-                "casas_decimais": 0,
-                "formato_excel": "",
-            }
-
-    return completed
-
-
-def _set_column_formats(writer, sheet_name: str, df: pd.DataFrame, semantic_map: Dict[str, dict] = None):
-    wb = writer.book
-    ws = writer.sheets[sheet_name]
-    fmt_head = _make_xlsx_format(wb, "texto", 0, is_header=True)
-
-    final_map = _complete_semantic_map_for_df(df, semantic_map)
-
-    for i, col in enumerate(df.columns):
-        ws.write(0, i, col, fmt_head)
-        ser = df[col]
-        meta = final_map[col]
-        semantic_type = meta["tipo_logico"]
-        decimals = int(meta.get("casas_decimais", 0))
-        is_diff = "diferen" in _norm_name(str(col))
-        width = max(len(str(col)), min(60, ser.astype(str).map(len).max() if len(ser) else 10)) + 2
-        fmt = _make_xlsx_format(wb, semantic_type, decimals, is_diff=is_diff)
-        ws.set_column(i, i, width, fmt)
-
-    ws.freeze_panes(1, 0)
-    ws.autofilter(0, 0, len(df), max(0, len(df.columns) - 1))
-
-
-def _add_total_row(writer, sheet_name: str, df: pd.DataFrame, semantic_map: Dict[str, dict] = None, skip_when_only_total_geral: bool = False):
-    if df.empty:
-        return
-
-    if skip_when_only_total_geral and "Agrupador" in df.columns:
-        vals = {_clean_text(v) for v in df["Agrupador"].dropna().astype(str).unique().tolist() if _clean_text(v)}
-        if vals and vals == {"TOTAL GERAL"}:
-            return
-
-    wb = writer.book
-    ws = writer.sheets[sheet_name]
-    total_row = len(df) + 1
-    fmt_total_txt = _make_xlsx_format(wb, "texto", 0, is_total=True)
-
-    final_map = _complete_semantic_map_for_df(df, semantic_map)
-
-    label = "TOTAL FILTRADO"
-    if skip_when_only_total_geral and "Agrupador" in df.columns:
-        tem_detalhe = any(_clean_text(v) != "TOTAL GERAL" for v in df["Agrupador"].dropna().astype(str).tolist())
-        if not tem_detalhe:
-            return
-        label = "TOTAL FILTRADO (visão filtrada)"
-
-    ws.write(total_row, 0, label, fmt_total_txt)
-
-    for col_idx, col in enumerate(df.columns[1:], start=1):
-        if pd.api.types.is_numeric_dtype(df[col]):
-            col_letter = chr(65 + col_idx) if col_idx < 26 else None
-            if col_letter:
-                meta = final_map[col]
-                fmt = _make_xlsx_format(
-                    wb,
-                    meta["tipo_logico"],
-                    int(meta.get("casas_decimais", 0)),
-                    is_total=True,
-                    is_diff=("diferen" in _norm_name(str(col))),
-                )
-                ws.write_formula(total_row, col_idx, f"=SUBTOTAL(109,{col_letter}2:{col_letter}{len(df)+1})", fmt)
-
-
-def _write_dataframe_block(ws, wb, start_row: int, start_col: int, title: str, df: pd.DataFrame, semantic_map: Dict[str, dict] = None):
-    header_fmt = wb.add_format({"bold": True, "bg_color": "#1F2A44", "font_color": "#FFFFFF", "border": 1, "align": "left", "valign": "vcenter"})
-    colhead_fmt = _make_xlsx_format(wb, "texto", 0, is_header=True)
-
-    width = max(1, len(df.columns))
-    ws.merge_range(start_row, start_col, start_row, start_col + width - 1, title, header_fmt)
-
-    if df.empty:
-        ws.write(start_row + 1, start_col, "Sem dados para exibir.")
-        return start_row + 2
-
-    final_map = _complete_semantic_map_for_df(df, semantic_map)
-
-    for j, col in enumerate(df.columns):
-        ws.write(start_row + 1, start_col + j, col, colhead_fmt)
-        max_len = len(str(col))
-        meta = final_map[col]
-        fmt = _make_xlsx_format(
-            wb,
-            meta["tipo_logico"],
-            int(meta.get("casas_decimais", 0)),
-            is_diff=("diferen" in _norm_name(str(col))),
-        )
-
-        for i, val in enumerate(df[col].tolist(), start=0):
-            cell_row = start_row + 2 + i
-
-            if meta["tipo_logico"] in ["moeda", "numero", "percentual"] and pd.notna(val) and str(val) != "":
-                try:
-                    ws.write_number(cell_row, start_col + j, float(val), fmt)
-                except Exception:
-                    ws.write(cell_row, start_col + j, val, fmt)
-            else:
-                ws.write(cell_row, start_col + j, val, fmt)
-
-            max_len = max(max_len, len(str(val)))
-
-        ws.set_column(start_col + j, start_col + j, min(max_len + 2, 32))
-
-    return start_row + 2 + len(df)
-
-
-# ============================================================
-# Indicadores executivos
-# ============================================================
-
-def _build_resumo_metricas(
-    resumo_global: pd.DataFrame,
-    detalhe: pd.DataFrame,
-    ponte: pd.DataFrame,
-    resultado_full: pd.DataFrame,
-    base1_name: str,
-    base2_name: str,
-):
-    qtd_campos = int(resumo_global["Campo confrontado"].nunique()) if "Campo confrontado" in resumo_global.columns else 0
-    qtd_diverg = int(len(detalhe))
-
-    qtd_dup = int(detalhe["MOTIVO"].eq("Duplicidade").sum()) if (not detalhe.empty and "MOTIVO" in detalhe.columns) else 0
-    qtd_so_b1 = int(detalhe["MOTIVO"].eq(f"Chave só na {base1_name}").sum()) if (not detalhe.empty and "MOTIVO" in detalhe.columns) else 0
-    qtd_so_b2 = int(detalhe["MOTIVO"].eq(f"Chave só na {base2_name}").sum()) if (not detalhe.empty and "MOTIVO" in detalhe.columns) else 0
-
-    qtd_reg_b1 = int(resultado_full["PRESENCA"].isin(["Em ambas", f"Somente {base1_name}"]).sum()) if (not resultado_full.empty and "PRESENCA" in resultado_full.columns) else 0
-    qtd_reg_b2 = int(resultado_full["PRESENCA"].isin(["Em ambas", f"Somente {base2_name}"]).sum()) if (not resultado_full.empty and "PRESENCA" in resultado_full.columns) else 0
-    qtd_conc = int(resultado_full["MOTIVO"].eq("Conciliado").sum()) if (not resultado_full.empty and "MOTIVO" in resultado_full.columns) else 0
-
-    base_ref = max(qtd_reg_b1, qtd_reg_b2, 1)
-    taxa_conc = qtd_conc / base_ref
-    taxa_div = qtd_diverg / base_ref
-
-    metricas = pd.DataFrame(
-        [
-            {"Indicador": "Campos confrontados", "Valor": qtd_campos},
-            {"Indicador": f"Registros {base1_name}", "Valor": qtd_reg_b1},
-            {"Indicador": f"Registros {base2_name}", "Valor": qtd_reg_b2},
-            {"Indicador": "Itens em divergência", "Valor": qtd_diverg},
-            {"Indicador": "Qtd. em duplicidade", "Valor": qtd_dup},
-            {"Indicador": f"Qtd. só na {base1_name}", "Valor": qtd_so_b1},
-            {"Indicador": f"Qtd. só na {base2_name}", "Valor": qtd_so_b2},
-            {"Indicador": "Qtd. conciliados", "Valor": qtd_conc},
-            {"Indicador": "Taxa de conciliação", "Valor": taxa_conc},
-            {"Indicador": "Taxa de divergência", "Valor": taxa_div},
-        ]
-    )
-
+    metricas = pd.DataFrame([
+        {"Indicador": "Campos confrontados", "Valor": int(len(resumo_global))},
+        {"Indicador": f"Registros {base1_name}", "Valor": int((full["ORIGEM"].eq(f"Somente {base1_name}") | full["ORIGEM"].eq("Ambos")).sum())},
+        {"Indicador": f"Registros {base2_name}", "Valor": int((full["ORIGEM"].eq(f"Somente {base2_name}") | full["ORIGEM"].eq("Ambos")).sum())},
+        {"Indicador": "Itens em divergência", "Valor": qtd_div},
+        {"Indicador": "Qtd. em duplicidade", "Valor": qtd_dup},
+        {"Indicador": f"Qtd. só na {base1_name}", "Valor": qtd_only_a},
+        {"Indicador": f"Qtd. só na {base2_name}", "Valor": qtd_only_b},
+        {"Indicador": "Qtd. conciliados", "Valor": qtd_conc},
+    ])
     return metricas
 
-def _build_metricas_semantic_map(metricas: pd.DataFrame) -> Dict[str, dict]:
-    out = {}
-    for _, row in metricas.iterrows():
-        ind = str(row["Indicador"])
-        if ind in [
-            "Campos confrontados",
-            "Itens em divergência",
-            "Qtd. em duplicidade",
-            "Qtd. conciliados",
-        ] or ind.startswith("Registros ") or ind.startswith("Qtd. só na "):
-            out[ind] = {"tipo_logico": "numero", "casas_decimais": 0, "formato_excel": "0"}
-        elif ind in ["Taxa de conciliação", "Taxa de divergência"]:
-            out[ind] = {"tipo_logico": "percentual", "casas_decimais": 2, "formato_excel": "0.00%"}
-        else:
-            out[ind] = {"tipo_logico": "numero", "casas_decimais": 0, "formato_excel": "0"}
 
+def _build_metricas_semantic_map(metricas: pd.DataFrame) -> Dict[str, dict]:
     return {
         "Indicador": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
         "Valor": {"tipo_logico": "numero", "casas_decimais": 0, "formato_excel": "0"},
-        "__linha__": out,
     }
 
+
 def _prepare_top_pendencias(detalhe: pd.DataFrame) -> pd.DataFrame:
-    if detalhe.empty:
-        return pd.DataFrame()
-    diff_cols = [c for c in detalhe.columns if "Diferença" in str(c)]
-    base_cols = [c for c in detalhe.columns if c not in diff_cols][:4]
-    view_cols = base_cols + diff_cols[:1] + (["MOTIVO"] if "MOTIVO" in detalhe.columns else [])
-    top = detalhe[view_cols].copy()
-    if diff_cols:
-        top = top.assign(__ABS__=top[diff_cols[0]].abs()).sort_values("__ABS__", ascending=False).drop(columns=["__ABS__"])
-    return top.head(10)
+    diff_cols = [c for c in detalhe.columns if c.startswith("Diferença ")]
+    key_cols = [c for c in detalhe.columns if c not in ["Status", "Origem", "Agrupador"] + diff_cols and not c.endswith(" Base 1") and not c.endswith(" Base 2")]
+    if not diff_cols:
+        return pd.DataFrame(columns=["Chave", "Impacto"])
+    tmp = detalhe.copy()
+    tmp["Impacto"] = tmp[diff_cols].apply(pd.to_numeric, errors="coerce").fillna(0).abs().sum(axis=1)
+    tmp["Chave"] = tmp[key_cols].astype(str).agg(" | ".join, axis=1) if key_cols else tmp.index.astype(str)
+    tmp = tmp.sort_values("Impacto", ascending=False).head(10)
+    return tmp[["Chave", "Impacto"]]
 
 
-# ============================================================
-# Export Excel
-# ============================================================
-
-def _write_resumo_global_block(ws, wb, start_row: int, start_col: int, title: str, df: pd.DataFrame, semantic_map: Dict[str, dict]):
-    header_fmt = wb.add_format({"bold": True, "bg_color": "#1F2A44", "font_color": "#FFFFFF", "border": 1, "align": "left", "valign": "vcenter"})
+def _write_dataframe_block(ws, wb, start_row: int, start_col: int, title: str, df: pd.DataFrame, semantic_map: Dict[str, dict]):
+    title_fmt = wb.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#1F3157", "font_size": 10})
     colhead_fmt = _make_xlsx_format(wb, "texto", 0, is_header=True)
     text_fmt = _make_xlsx_format(wb, "texto", 0)
 
-    width = max(1, len(df.columns))
-    ws.merge_range(start_row, start_col, start_row, start_col + width - 1, title, header_fmt)
-
-    if df.empty:
-        ws.write(start_row + 1, start_col, "Sem dados para exibir.")
-        return start_row + 2
-
-    linha_map = semantic_map.get("__linha__", {})
-
+    ws.write(start_row, start_col, title, title_fmt)
     for j, col in enumerate(df.columns):
         ws.write(start_row + 1, start_col + j, col, colhead_fmt)
 
-    for i, row in df.reset_index(drop=True).iterrows():
-        cell_row = start_row + 2 + i
-        campo = str(row.get("Campo confrontado", ""))
-        meta = linha_map.get(campo, {"tipo_logico": "numero", "casas_decimais": 2})
-
+    for i in range(len(df)):
         for j, col in enumerate(df.columns):
-            val = row[col]
-            if j == 0:
-                ws.write(cell_row, start_col + j, val, text_fmt)
-                continue
-
-            fmt = _make_xlsx_format(
-                wb,
-                meta.get("tipo_logico", "numero"),
-                int(meta.get("casas_decimais", 2)),
-                is_diff=("diferen" in _norm_name(str(col))),
-            )
-
-            if meta.get("tipo_logico") in ["moeda", "numero", "percentual"] and pd.notna(val) and str(val) != "":
-                try:
-                    ws.write_number(cell_row, start_col + j, float(val), fmt)
-                except Exception:
-                    ws.write(cell_row, start_col + j, val, fmt)
+            val = df.iloc[i, j]
+            meta = semantic_map.get(col, {"tipo_logico": "texto", "casas_decimais": 0})
+            is_diff = "diferença" in _norm_name(col)
+            fmt = _make_xlsx_format(wb, meta["tipo_logico"], int(meta.get("casas_decimais", 0)), is_diff=is_diff)
+            if meta["tipo_logico"] in ["numero", "moeda", "percentual"]:
+                ws.write_number(start_row + 2 + i, start_col + j, float(pd.to_numeric(val, errors="coerce") or 0), fmt)
             else:
-                ws.write(cell_row, start_col + j, val, fmt)
+                ws.write(start_row + 2 + i, start_col + j, _clean_text(val), fmt if meta["tipo_logico"] != "texto" else text_fmt)
 
-    ws.set_column(start_col, start_col, 28)
-    ws.set_column(start_col + 1, start_col + 3, 18)
+    for j, col in enumerate(df.columns):
+        ws.set_column(start_col + j, start_col + j, _auto_width(df, col))
+
     return start_row + 2 + len(df)
+
+
+def _write_resumo_global_block(ws, wb, start_row: int, start_col: int, title: str, df: pd.DataFrame, semantic_map: Dict[str, dict]):
+    return _write_dataframe_block(ws, wb, start_row, start_col, title, df, semantic_map)
 
 
 def _write_metricas_block(ws, wb, start_row: int, start_col: int, title: str, df: pd.DataFrame, semantic_map: Dict[str, dict]):
-    header_fmt = wb.add_format({"bold": True, "bg_color": "#1F2A44", "font_color": "#FFFFFF", "border": 1, "align": "left", "valign": "vcenter"})
+    return _write_dataframe_block(ws, wb, start_row, start_col, title, df, semantic_map)
+
+
+def _set_column_formats(writer, sheet_name: str, df: pd.DataFrame, semantic_map: Dict[str, dict]):
+    wb = writer.book
+    ws = writer.sheets[sheet_name]
     colhead_fmt = _make_xlsx_format(wb, "texto", 0, is_header=True)
     text_fmt = _make_xlsx_format(wb, "texto", 0)
 
-    width = max(1, len(df.columns))
-    ws.merge_range(start_row, start_col, start_row, start_col + width - 1, title, header_fmt)
-
-    if df.empty:
-        ws.write(start_row + 1, start_col, "Sem dados para exibir.")
-        return start_row + 2
-
-    linha_map = semantic_map.get("__linha__", {})
-
     for j, col in enumerate(df.columns):
-        ws.write(start_row + 1, start_col + j, col, colhead_fmt)
-
-    for i, row in df.reset_index(drop=True).iterrows():
-        cell_row = start_row + 2 + i
-        indicador = str(row["Indicador"])
-        meta = linha_map.get(indicador, {"tipo_logico": "texto", "casas_decimais": 0})
-
-        ws.write(cell_row, start_col, indicador, text_fmt)
-
-        fmt = _make_xlsx_format(wb, meta["tipo_logico"], int(meta.get("casas_decimais", 0)))
-        val = row["Valor"]
-
-        if meta["tipo_logico"] in ["moeda", "numero", "percentual"] and pd.notna(val):
-            try:
-                ws.write_number(cell_row, start_col + 1, float(val), fmt)
-            except Exception:
-                ws.write(cell_row, start_col + 1, val, fmt)
+        ws.write(0, j, col, colhead_fmt)
+        meta = semantic_map.get(col, {"tipo_logico": "texto", "casas_decimais": 0})
+        fmt = _make_xlsx_format(wb, meta["tipo_logico"], int(meta.get("casas_decimais", 0)), is_diff=("diferença" in _norm_name(col)))
+        if meta["tipo_logico"] == "texto":
+            ws.set_column(j, j, _auto_width(df, col), text_fmt)
         else:
-            ws.write(cell_row, start_col + 1, val, fmt)
+            ws.set_column(j, j, _auto_width(df, col), fmt)
 
-    ws.set_column(start_col, start_col, 34)
-    ws.set_column(start_col + 1, start_col + 1, 18)
 
-    return start_row + 2 + len(df)
+def _add_total_row(writer, sheet_name: str, df: pd.DataFrame, semantic_map: Dict[str, dict], skip_when_only_total_geral: bool = False):
+    wb = writer.book
+    ws = writer.sheets[sheet_name]
+    fmt_total_txt = _make_xlsx_format(wb, "texto", 0, is_total=True)
+
+    if skip_when_only_total_geral and "Agrupador" in df.columns:
+        vals = {_clean_text(v) for v in df["Agrupador"].dropna().astype(str).unique().tolist() if _clean_text(v)}
+        if vals == {"TOTAL GERAL"}:
+            return
+
+    row = len(df) + 1
+    ws.write(row, 0, "Total", fmt_total_txt)
+    for j, col in enumerate(df.columns[1:], start=1):
+        meta = semantic_map.get(col, {"tipo_logico": "texto", "casas_decimais": 0})
+        if meta["tipo_logico"] in ["numero", "moeda", "percentual"]:
+            fmt = _make_xlsx_format(wb, meta["tipo_logico"], int(meta.get("casas_decimais", 0)), is_total=True, is_diff=("diferença" in _norm_name(col)))
+            ws.write_formula(row, j, f"=SUM({chr(65+j)}2:{chr(65+j)}{len(df)+1})", fmt)
+        else:
+            ws.write_blank(row, j, None, fmt_total_txt)
 
 
 def _export_excel(
-    results: Dict[str, pd.DataFrame],
+    results: dict,
     resumo_exec: pd.DataFrame,
     detalhe: pd.DataFrame,
     ponte: pd.DataFrame,
     output_semantics: Dict[str, Dict[str, dict]],
     base1_name: str,
     base2_name: str,
+    analysis_name: str = "Nova análise",
 ) -> bytes:
     resumo_global = results["resumo_global"]
     metricas = _build_resumo_metricas(resumo_global, detalhe, ponte, results["full"], base1_name, base2_name)
@@ -1152,16 +775,17 @@ def _export_excel(
         title_fmt = wb.add_format({"bold": True, "font_size": 18, "font_color": "#0F172A"})
         sub_fmt = wb.add_format({"italic": True, "font_color": "#5B6577"})
 
-        ws.write(0, 0, "Central de Análises — Resumo Executivo", title_fmt)
-        ws.write(1, 0, pd.Timestamp.now().strftime("Gerado em %d/%m/%Y %H:%M:%S"), sub_fmt)
+        ws.write(0, 0, "Central de Conciliações — Resumo Executivo", title_fmt)
+        ws.write(1, 0, f"Análise: {analysis_name}", sub_fmt)
+        ws.write(2, 0, pd.Timestamp.now().strftime("Gerado em %d/%m/%Y %H:%M:%S"), sub_fmt)
 
         row_a = _write_resumo_global_block(
-            ws, wb, 3, 0, "Fechamento global dos campos confrontados", resumo_global,
+            ws, wb, 4, 0, "Fechamento global dos campos confrontados", resumo_global,
             semantic_map=output_semantics.get("resumo_global", {}),
         )
 
         row_b = _write_metricas_block(
-            ws, wb, 3, 6, "Indicadores executivos", metricas,
+            ws, wb, 4, 6, "Indicadores executivos", metricas,
             semantic_map=metricas_semantic,
         )
 
@@ -1178,7 +802,7 @@ def _export_excel(
             semantic_map=output_semantics.get("top10", {}),
         )
 
-        ws.freeze_panes(4, 0)
+        ws.freeze_panes(5, 0)
 
         detalhe.to_excel(writer, sheet_name="Divergencias", index=False)
         _set_column_formats(writer, "Divergencias", detalhe, semantic_map=output_semantics.get("detalhe", {}))
@@ -1188,11 +812,15 @@ def _export_excel(
         if "Agrupador" in ponte_export.columns:
             ponte_export["Agrupador"] = ponte_export["Agrupador"].astype(str)
             ponte_export.loc[ponte_export["Agrupador"].eq("TOTAL GERAL"), "Agrupador"] = " TOTAL GERAL"
+        ponte_export.to_excel(writer, sheet_name="Agrupador", index=False)
+        _set_column_formats(writer, "Agrupador", ponte_export, semantic_map=output_semantics.get("resumo_exec", {}))
+        _add_total_row(writer, "Agrupador", ponte_export, semantic_map=output_semantics.get("resumo_exec", {}), skip_when_only_total_geral=True)
 
-        ponte_export.to_excel(writer, sheet_name="Ponte_Conciliacao", index=False)
-        _set_column_formats(writer, "Ponte_Conciliacao", ponte_export, semantic_map=output_semantics.get("ponte", {}))
-        _add_total_row(writer, "Ponte_Conciliacao", ponte_export, semantic_map=output_semantics.get("ponte", {}), skip_when_only_total_geral=True)
+        resumo_global.to_excel(writer, sheet_name="Fechamento_Global", index=False)
+        _set_column_formats(writer, "Fechamento_Global", resumo_global, semantic_map=output_semantics.get("resumo_global", {}))
+        _add_total_row(writer, "Fechamento_Global", resumo_global, semantic_map=output_semantics.get("resumo_global", {}))
 
+    bio.seek(0)
     return bio.getvalue()
 
 
@@ -1201,14 +829,13 @@ def _export_excel(
 # ============================================================
 
 def _render_header_row(labels: List[str]):
-    cols = st.columns([1.15, 1.15, 0.9, 0.7, 0.9])
-    for col, label in zip(cols, labels):
-        with col:
-            st.markdown(f"**{label}**")
+    cols = st.columns([1.3, 1.3, 1.2, 0.9, 1.1])
+    for c, lbl in zip(cols, labels):
+        c.markdown(f"**{lbl}**")
 
 
-def _render_pair_line(df_a, df_b, cols_a, cols_b, row, idx, prefix: str, is_value: bool = False):
-    cols = st.columns([1.15, 1.15, 0.9, 0.7, 0.9])
+def _render_pair_line(df_a: pd.DataFrame, df_b: pd.DataFrame, cols_a: List[str], cols_b: List[str], row: dict, idx: int, prefix: str, is_value: bool = False):
+    cols = st.columns([1.3, 1.3, 1.2, 0.9, 1.1])
 
     with cols[0]:
         a_col = st.selectbox(
@@ -1261,7 +888,7 @@ def _render_pair_line(df_a, df_b, cols_a, cols_b, row, idx, prefix: str, is_valu
 
     with cols[3]:
         selected_type = st.selectbox(
-            f"Tipo lógico #{idx+1}",
+            f"Tipo de dado #{idx+1}",
             options=SEMANTIC_TYPES,
             index=SEMANTIC_TYPES.index(current_type) if current_type in SEMANTIC_TYPES else 0,
             key=f"{prefix}_type_{idx}",
@@ -1271,211 +898,3 @@ def _render_pair_line(df_a, df_b, cols_a, cols_b, row, idx, prefix: str, is_valu
     if selected_type != current_type:
         current_type = selected_type
         if not fmt_manual:
-            current_format = suggested_by_type.get(current_type, "")
-
-    format_disabled = current_type == "texto"
-
-    if current_type == "texto":
-        current_format = ""
-        fmt_manual = False
-
-    fmt_key = f"{prefix}_fmt_{idx}_{current_type}"
-
-    with cols[4]:
-        excel_format = st.text_input(
-            f"Formato Excel #{idx+1}",
-            value=current_format,
-            key=fmt_key,
-            label_visibility="collapsed",
-            disabled=format_disabled,
-        )
-
-    if current_type == "texto":
-        excel_format = ""
-        fmt_manual = False
-    else:
-        fmt_manual = excel_format != suggested_by_type.get(current_type, "")
-
-    return {
-        "a": a_col,
-        "b": b_col,
-        "label": label,
-        "semantic_type": current_type,
-        "excel_format": excel_format,
-        "fmt_manual": fmt_manual,
-        "last_signature": signature,
-    }
-
-
-# ============================================================
-# App
-# ============================================================
-
-def main():
-    _init_state()
-
-    st.title("Central de Análises")
-    st.subheader("Análise de Consistência entre Bases")
-    st.caption("Confronta valores entre duas bases, fecha totais, destaca divergências e evidencia onde estão as diferenças.")
-
-    st.subheader("1) Bases da análise")
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.session_state["cm_base1_name"] = st.text_input("Nome da Base 1", st.session_state["cm_base1_name"])
-        up_a = st.file_uploader("Arquivo Base 1", type=["xlsx", "xls", "csv"], key="cm_up_a")
-
-    with c2:
-        st.session_state["cm_base2_name"] = st.text_input("Nome da Base 2", st.session_state["cm_base2_name"])
-        up_b = st.file_uploader("Arquivo Base 2", type=["xlsx", "xls", "csv"], key="cm_up_b")
-
-    if not up_a or not up_b:
-        st.info("Carregue as duas bases para continuar.")
-        return
-
-    base1_name = st.session_state["cm_base1_name"]
-    base2_name = st.session_state["cm_base2_name"]
-
-    with st.spinner("Carregando bases..."):
-        df_a = _read_file_cached(up_a.getvalue(), up_a.name)
-        df_b = _read_file_cached(up_b.getvalue(), up_b.name)
-
-    cols_a = _get_column_list(tuple(df_a.columns))
-    cols_b = _get_column_list(tuple(df_b.columns))
-
-    st.subheader("2) Campos que identificam o mesmo registro nas duas bases")
-    st.caption("Nesta etapa você define as chaves e já registra o tipo lógico e o formato esperado no Excel.")
-    _render_header_row(["Base 1", "Base 2", "Nome da dimensão", "Tipo lógico", "Formato Excel"])
-
-    for i, row in enumerate(st.session_state["cm_key_rows"]):
-        st.session_state["cm_key_rows"][i] = _render_pair_line(
-            df_a, df_b, cols_a, cols_b, row, i, prefix="cm_key", is_value=False
-        )
-
-    if st.button("Adicionar par-chave"):
-        st.session_state["cm_key_rows"].append({
-            "a": "", "b": "", "label": "",
-            "semantic_type": "",
-            "excel_format": "",
-            "fmt_manual": False,
-            "last_signature": "",
-        })
-        st.rerun()
-
-    st.subheader("3) Quais campos deseja confrontar para validar")
-    st.caption("Aqui você escolhe os valores que serão confrontados e já define o tipo lógico e o formato de saída.")
-    _render_header_row(["Valor Base 1", "Valor Base 2", "Nome do valor", "Tipo lógico", "Formato Excel"])
-
-    for i, row in enumerate(st.session_state["cm_val_rows"]):
-        st.session_state["cm_val_rows"][i] = _render_pair_line(
-            df_a, df_b, cols_a, cols_b, row, i, prefix="cm_val", is_value=True
-        )
-
-    if st.button("Adicionar campo de valor"):
-        st.session_state["cm_val_rows"].append({
-            "a": "", "b": "", "label": "",
-            "semantic_type": "",
-            "excel_format": "",
-            "fmt_manual": False,
-            "last_signature": "",
-        })
-        st.rerun()
-
-    st.subheader("4) Como deseja receber o resultado?")
-    gerar_exec = st.checkbox("Gerar resumo executivo", value=True)
-
-    valid_keys = [r for r in st.session_state["cm_key_rows"] if r.get("a") and r.get("b")]
-    valid_vals = [r for r in st.session_state["cm_val_rows"] if r.get("a") and r.get("b")]
-
-    default_group = [r.get("label") or _friendly_label(r.get("a", ""), r.get("b", "")) for r in valid_keys]
-    default_total = [r.get("label") or _friendly_label(r.get("a", ""), r.get("b", "")) for r in valid_vals]
-
-    g1, g2 = st.columns(2)
-    with g1:
-        group_labels = st.multiselect(
-            "Agrupar resumo por",
-            options=default_group,
-            default=default_group[:1] if default_group else []
-        ) if gerar_exec else []
-    with g2:
-        total_labels = st.multiselect(
-            "O que deseja totalizar/confrontar",
-            options=default_total,
-            default=default_total
-        ) if gerar_exec else []
-
-    st.subheader("5) Processar análise")
-    executar = st.button("Executar análise")
-
-    if executar:
-        if not valid_keys:
-            st.error("Informe pelo menos um par-chave válido.")
-            return
-
-        if not valid_vals:
-            st.error("Informe pelo menos um campo de valor válido.")
-            return
-
-        for r in valid_keys:
-            if not r.get("label"):
-                r["label"] = _friendly_label(r["a"], r["b"])
-
-        for r in valid_vals:
-            if not r.get("label"):
-                r["label"] = _friendly_label(r["a"], r["b"])
-
-        with st.spinner("Processando análise..."):
-            t0 = time.perf_counter()
-
-            results = _run_reconciliation(df_a, df_b, valid_keys, valid_vals, base1_name, base2_name)
-            exec_df, detail_df, ponte_df = _build_executive_and_detail(
-                results,
-                group_labels,
-                total_labels or default_total,
-                base1_name,
-                base2_name,
-            )
-
-            output_semantics = _build_output_semantic_maps(
-                key_pairs=valid_keys,
-                value_pairs=valid_vals,
-                group_labels=group_labels if group_labels else [valid_keys[0]["label"]],
-                base1_name=base1_name,
-                base2_name=base2_name,
-            )
-
-            excel = _export_excel(
-                results,
-                exec_df,
-                detail_df,
-                ponte_df,
-                output_semantics,
-                base1_name,
-                base2_name,
-            )
-
-            elapsed = time.perf_counter() - t0
-
-        st.success(f"Análise concluída em {elapsed:.2f}s.")
-        st.markdown("**Resumo da conciliação**")
-        st.dataframe(results["resumo_global"], use_container_width=True)
-
-        if gerar_exec:
-            st.markdown("**Resumo executivo**")
-            st.dataframe(exec_df, use_container_width=True)
-            st.markdown("**Ponte da conciliação**")
-            st.dataframe(ponte_df, use_container_width=True)
-
-        st.markdown("**Detalhe das diferenças**")
-        st.dataframe(detail_df.head(200), use_container_width=True)
-
-        st.download_button(
-            "Baixar Excel da análise",
-            data=excel,
-            file_name="Central_Analises_V31.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-
-if __name__ == "__main__":
-    main()
