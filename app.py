@@ -8,15 +8,14 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Central de Análises - Consistência entre Bases V30", layout="wide")
+st.set_page_config(page_title="Central de Análises - Consistência entre Bases V31", layout="wide")
 
 
 # ============================================================
-# Constantes semânticas
+# Constantes
 # ============================================================
 
 SEMANTIC_TYPES = ["texto", "numero", "moeda", "percentual", "data"]
-SEMANTIC_ROLES = ["chave", "valor", "apoio"]
 
 
 # ============================================================
@@ -154,7 +153,7 @@ def _safe_get_series(df: pd.DataFrame, col_name: str, default_text: bool = True)
 
 
 # ============================================================
-# Semântica das colunas
+# Semântica
 # ============================================================
 
 def _sample_non_null(sr: pd.Series, n: int = 30) -> pd.Series:
@@ -178,12 +177,11 @@ def _looks_like_number(sr: pd.Series) -> bool:
     raw = sample.astype(str)
     normalized = raw.str.replace(r"\s", "", regex=True)
     normalized = normalized.str.replace("%", "", regex=False)
-
     ok = normalized.str.match(r"^-?[\d\.\,]+$", na=False)
     return ok.mean() >= 0.7
 
 
-def _infer_semantic_type(col_name: str, sr: pd.Series) -> str:
+def _infer_semantic_type(col_name: str, sr: pd.Series, prefer_value: bool = False) -> str:
     name = _norm_name(col_name)
 
     if any(k in name for k in ["percentual", "aliquota", "aliq", "perc", "taxa", "%"]):
@@ -205,25 +203,26 @@ def _infer_semantic_type(col_name: str, sr: pd.Series) -> str:
         sample = _sample_non_null(sr)
         if not sample.empty and sample.str.contains("%", regex=False).mean() >= 0.3:
             return "percentual"
+        if prefer_value:
+            return "moeda"
         return "numero"
 
     return "texto"
 
 
-def _infer_semantic_role(col_name: str, semantic_type: str) -> str:
-    name = _norm_name(col_name)
+def _infer_decimal_places_for_type(semantic_type: str, sr: pd.Series) -> int:
+    if semantic_type == "percentual":
+        return 2
+    if semantic_type == "moeda":
+        return 2
+    if semantic_type in ["texto", "data"]:
+        return 0
 
-    if semantic_type in ["moeda", "percentual"]:
-        return "valor"
-
-    if any(k in name for k in [
-        "filial", "codigo", "cod ", "cod_", "id", "conta", "documento", "doc",
-        "patrimonio", "plaqueta", "item", "produto", "cliente", "fornecedor",
-        "centro custo", "ccusto", "chave"
-    ]):
-        return "chave"
-
-    return "apoio"
+    sample_num = _to_number(_sample_non_null(sr))
+    if sample_num.empty:
+        return 0
+    has_decimal = ((sample_num % 1).abs() > 0.0000001).any()
+    return 2 if has_decimal else 0
 
 
 def _excel_format_by_semantic_type(semantic_type: str, decimals: int = 2) -> str:
@@ -238,199 +237,45 @@ def _excel_format_by_semantic_type(semantic_type: str, decimals: int = 2) -> str
     return ''
 
 
-def _infer_decimal_places_for_numeric(sr: pd.Series, semantic_type: str) -> int:
-    if semantic_type == "percentual":
-        return 2
-    if semantic_type == "moeda":
-        return 2
-    if semantic_type == "data":
-        return 0
-    if semantic_type == "texto":
-        return 0
-
-    sample_num = _to_number(_sample_non_null(sr))
-    if sample_num.empty:
-        return 0
-    has_decimal = ((sample_num % 1).abs() > 0.0000001).any()
-    return 2 if has_decimal else 0
+def _get_col_series(df: pd.DataFrame, col_name: str):
+    if col_name and col_name in df.columns:
+        return df[col_name]
+    return pd.Series([], dtype="object")
 
 
-def _build_semantic_catalog(df: pd.DataFrame) -> pd.DataFrame:
-    rows = []
+def _suggest_pair_semantics(df_a: pd.DataFrame, df_b: pd.DataFrame, col_a: str, col_b: str, prefer_value: bool = False):
+    sr_a = _get_col_series(df_a, col_a)
+    sr_b = _get_col_series(df_b, col_b)
 
-    for col in df.columns:
-        sr = df[col]
-        semantic_type = _infer_semantic_type(col, sr)
-        semantic_role = _infer_semantic_role(col, semantic_type)
-        decimals = _infer_decimal_places_for_numeric(sr, semantic_type)
-
-        rows.append({
-            "coluna": col,
-            "tipo_logico": semantic_type,
-            "papel": semantic_role,
-            "casas_decimais": decimals,
-            "totaliza": semantic_type in ["moeda", "numero", "percentual"],
-            "formato_excel": _excel_format_by_semantic_type(semantic_type, decimals),
-        })
-
-    return pd.DataFrame(rows)
-
-
-def _catalog_to_map(catalog_df: pd.DataFrame) -> Dict[str, dict]:
-    out = {}
-    if catalog_df is None or catalog_df.empty:
-        return out
-
-    for _, row in catalog_df.iterrows():
-        col = str(row["coluna"])
-        out[col] = {
-            "tipo_logico": str(row.get("tipo_logico", "texto")),
-            "papel": str(row.get("papel", "apoio")),
-            "casas_decimais": int(row.get("casas_decimais", 0) if pd.notna(row.get("casas_decimais", 0)) else 0),
-            "totaliza": bool(row.get("totaliza", False)),
-            "formato_excel": str(row.get("formato_excel", "")),
-        }
-    return out
-
-
-def _get_semantic_from_map(catalog_map: Dict[str, dict], col: str) -> dict:
-    return catalog_map.get(col, {
-        "tipo_logico": "texto",
-        "papel": "apoio",
-        "casas_decimais": 0,
-        "totaliza": False,
-        "formato_excel": "",
-    })
-
-
-def _unify_output_semantic(meta_a: dict, meta_b: dict) -> dict:
-    ta = meta_a.get("tipo_logico", "texto")
-    tb = meta_b.get("tipo_logico", "texto")
+    ta = _infer_semantic_type(col_a, sr_a, prefer_value=prefer_value) if col_a else "texto"
+    tb = _infer_semantic_type(col_b, sr_b, prefer_value=prefer_value) if col_b else "texto"
 
     if ta == tb:
-        t = ta
+        final_type = ta
     elif "moeda" in [ta, tb]:
-        t = "moeda"
+        final_type = "moeda"
     elif "percentual" in [ta, tb]:
-        t = "percentual"
+        final_type = "percentual"
     elif "numero" in [ta, tb]:
-        t = "numero"
+        final_type = "numero"
     elif "data" in [ta, tb]:
-        t = "data"
+        final_type = "data"
     else:
-        t = "texto"
+        final_type = "texto"
 
-    decimals = max(int(meta_a.get("casas_decimais", 0)), int(meta_b.get("casas_decimais", 0)))
-    if t == "moeda":
+    dec_a = _infer_decimal_places_for_type(final_type, sr_a) if col_a else 0
+    dec_b = _infer_decimal_places_for_type(final_type, sr_b) if col_b else 0
+    decimals = max(dec_a, dec_b)
+
+    if final_type == "moeda":
         decimals = max(2, decimals)
-    if t == "percentual":
+    if final_type == "percentual":
         decimals = max(2, decimals)
 
     return {
-        "tipo_logico": t,
+        "tipo_logico": final_type,
         "casas_decimais": decimals,
-        "formato_excel": _excel_format_by_semantic_type(t, decimals),
-    }
-
-
-def _overall_numeric_semantic(value_pairs: List[dict], catalog_a: Dict[str, dict], catalog_b: Dict[str, dict]) -> dict:
-    metas = []
-    for vp in value_pairs:
-        ma = _get_semantic_from_map(catalog_a, vp["a"])
-        mb = _get_semantic_from_map(catalog_b, vp["b"])
-        metas.append(_unify_output_semantic(ma, mb))
-
-    if not metas:
-        return {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": _excel_format_by_semantic_type("numero", 2)}
-
-    tipos = {m["tipo_logico"] for m in metas}
-    if len(tipos) == 1:
-        t = list(tipos)[0]
-        dec = max(m["casas_decimais"] for m in metas)
-        return {"tipo_logico": t, "casas_decimais": dec, "formato_excel": _excel_format_by_semantic_type(t, dec)}
-
-    return {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": _excel_format_by_semantic_type("numero", 2)}
-
-
-def _build_output_semantic_maps(
-    key_pairs: List[dict],
-    value_pairs: List[dict],
-    group_labels: List[str],
-    base1_name: str,
-    base2_name: str,
-    catalog_a: Dict[str, dict],
-    catalog_b: Dict[str, dict],
-) -> Dict[str, Dict[str, dict]]:
-    key_meta_by_label = {}
-    value_meta_by_label = {}
-
-    for kp in key_pairs:
-        ma = _get_semantic_from_map(catalog_a, kp["a"])
-        mb = _get_semantic_from_map(catalog_b, kp["b"])
-        key_meta_by_label[kp["label"]] = _unify_output_semantic(ma, mb)
-
-    for vp in value_pairs:
-        ma = _get_semantic_from_map(catalog_a, vp["a"])
-        mb = _get_semantic_from_map(catalog_b, vp["b"])
-        value_meta_by_label[vp["label"]] = _unify_output_semantic(ma, mb)
-
-    resumo_exec = {}
-    detalhe = {}
-    top10 = {}
-
-    for lbl in group_labels:
-        resumo_exec[lbl] = key_meta_by_label.get(lbl, {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""})
-
-    for lbl, meta in value_meta_by_label.items():
-        resumo_exec[f"{lbl} {base1_name}"] = meta
-        resumo_exec[f"{lbl} {base2_name}"] = meta
-        resumo_exec[f"Diferença {lbl}"] = meta
-
-        detalhe[f"{lbl} {base1_name}"] = meta
-        detalhe[f"{lbl} {base2_name}"] = meta
-        detalhe[f"Diferença {lbl}"] = meta
-
-    for kp in key_pairs:
-        detalhe[kp["label"]] = key_meta_by_label.get(kp["label"], {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""})
-        top10[kp["label"]] = key_meta_by_label.get(kp["label"], {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""})
-
-    if value_pairs:
-        first_lbl = value_pairs[0]["label"]
-        if f"Diferença {first_lbl}" in detalhe:
-            top10[f"Diferença {first_lbl}"] = value_meta_by_label.get(first_lbl, {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": _excel_format_by_semantic_type("numero", 2)})
-
-    detalhe["MOTIVO"] = {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
-    top10["MOTIVO"] = {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
-    resumo_exec["Motivo predominante da diferença"] = {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
-
-    overall_meta = _overall_numeric_semantic(value_pairs, catalog_a, catalog_b)
-
-    ponte = {
-        "Agrupador": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
-        "Campo confrontado": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
-        "Componente": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
-        "Valor": overall_meta,
-    }
-
-    resumo_global = {
-        "Campo confrontado": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
-        f"Total {base1_name}": overall_meta,
-        f"Total {base2_name}": overall_meta,
-        "Diferença total": overall_meta,
-    }
-
-    metricas = {
-        "Indicador": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
-        "Valor": overall_meta,
-    }
-
-    return {
-        "resumo_exec": resumo_exec,
-        "detalhe": detalhe,
-        "top10": top10,
-        "ponte": ponte,
-        "resumo_global": resumo_global,
-        "metricas": metricas,
+        "formato_excel": _excel_format_by_semantic_type(final_type, decimals),
     }
 
 
@@ -505,9 +350,8 @@ def _init_state():
     defaults = {
         "cm_base1_name": "Base 1",
         "cm_base2_name": "Base 2",
-        "cm_key_rows": [{"a": "", "b": "", "label": ""}],
-        "cm_val_rows": [{"a": "", "b": "", "label": ""}],
-        "cm_run_clicked": False,
+        "cm_key_rows": [{"a": "", "b": "", "label": "", "semantic_type": "texto", "excel_format": ""}],
+        "cm_val_rows": [{"a": "", "b": "", "label": "", "semantic_type": "moeda", "excel_format": 'R$ #,##0.00'}],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -798,7 +642,103 @@ def _build_executive_and_detail(
 
 
 # ============================================================
-# Excel helpers
+# Semântica de saída
+# ============================================================
+
+def _get_output_semantic_for_key_pair(row: dict):
+    t = row.get("semantic_type", "texto")
+    decimals = 0 if t in ["texto", "data"] else 2
+    return {
+        "tipo_logico": t,
+        "casas_decimais": decimals,
+        "formato_excel": row.get("excel_format", _excel_format_by_semantic_type(t, decimals)),
+    }
+
+
+def _get_output_semantic_for_value_pair(row: dict):
+    t = row.get("semantic_type", "moeda")
+    decimals = 2 if t in ["moeda", "percentual", "numero"] else 0
+    return {
+        "tipo_logico": t,
+        "casas_decimais": decimals,
+        "formato_excel": row.get("excel_format", _excel_format_by_semantic_type(t, decimals)),
+    }
+
+
+def _build_output_semantic_maps(
+    key_pairs: List[dict],
+    value_pairs: List[dict],
+    group_labels: List[str],
+    base1_name: str,
+    base2_name: str,
+) -> Dict[str, Dict[str, dict]]:
+    key_meta = {kp["label"]: _get_output_semantic_for_key_pair(kp) for kp in key_pairs}
+    value_meta = {vp["label"]: _get_output_semantic_for_value_pair(vp) for vp in value_pairs}
+
+    resumo_exec = {}
+    detalhe = {}
+    top10 = {}
+
+    for lbl in group_labels:
+        resumo_exec[lbl] = key_meta.get(lbl, {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""})
+
+    for lbl, meta in value_meta.items():
+        resumo_exec[f"{lbl} {base1_name}"] = meta
+        resumo_exec[f"{lbl} {base2_name}"] = meta
+        resumo_exec[f"Diferença {lbl}"] = meta
+
+        detalhe[f"{lbl} {base1_name}"] = meta
+        detalhe[f"{lbl} {base2_name}"] = meta
+        detalhe[f"Diferença {lbl}"] = meta
+
+    for kp in key_pairs:
+        detalhe[kp["label"]] = key_meta.get(kp["label"], {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""})
+        top10[kp["label"]] = key_meta.get(kp["label"], {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""})
+
+    if value_pairs:
+        first_lbl = value_pairs[0]["label"]
+        top10[f"Diferença {first_lbl}"] = value_meta.get(first_lbl, {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": "0.00"})
+
+    detalhe["MOTIVO"] = {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
+    top10["MOTIVO"] = {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
+    resumo_exec["Motivo predominante da diferença"] = {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
+
+    if value_pairs:
+        main_meta = _get_output_semantic_for_value_pair(value_pairs[0])
+    else:
+        main_meta = {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": "0.00"}
+
+    ponte = {
+        "Agrupador": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
+        "Campo confrontado": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
+        "Componente": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
+        "Valor": main_meta,
+    }
+
+    resumo_global = {
+        "Campo confrontado": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
+        f"Total {base1_name}": main_meta,
+        f"Total {base2_name}": main_meta,
+        "Diferença total": main_meta,
+    }
+
+    metricas = {
+        "Indicador": {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""},
+        "Valor": main_meta,
+    }
+
+    return {
+        "resumo_exec": resumo_exec,
+        "detalhe": detalhe,
+        "top10": top10,
+        "ponte": ponte,
+        "resumo_global": resumo_global,
+        "metricas": metricas,
+    }
+
+
+# ============================================================
+# Excel
 # ============================================================
 
 def _make_xlsx_format(wb, semantic_type: str, decimals: int, is_header: bool = False, is_diff: bool = False, is_total: bool = False):
@@ -817,6 +757,8 @@ def _make_xlsx_format(wb, semantic_type: str, decimals: int, is_header: bool = F
         base["num_format"] = _excel_format_by_semantic_type("percentual", decimals)
     elif semantic_type == "numero":
         base["num_format"] = _excel_format_by_semantic_type("numero", decimals)
+    elif semantic_type == "data":
+        base["num_format"] = _excel_format_by_semantic_type("data", decimals)
 
     if is_diff:
         base.update({"font_color": "#C00000", "bold": True})
@@ -830,11 +772,11 @@ def _get_semantic_for_output_col(col: str, semantic_map: Dict[str, dict] = None)
 
     uc = str(col).upper()
     if "DIFERENÇA" in uc:
-        return {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": _excel_format_by_semantic_type("numero", 2)}
+        return {"tipo_logico": "numero", "casas_decimais": 2, "formato_excel": "0.00"}
     if any(x in uc for x in ["VALOR", "TOTAL"]):
-        return {"tipo_logico": "moeda", "casas_decimais": 2, "formato_excel": _excel_format_by_semantic_type("moeda", 2)}
+        return {"tipo_logico": "moeda", "casas_decimais": 2, "formato_excel": 'R$ #,##0.00'}
     if uc.startswith("QTD") or uc.startswith("QTDE"):
-        return {"tipo_logico": "numero", "casas_decimais": 0, "formato_excel": _excel_format_by_semantic_type("numero", 0)}
+        return {"tipo_logico": "numero", "casas_decimais": 0, "formato_excel": "0"}
     return {"tipo_logico": "texto", "casas_decimais": 0, "formato_excel": ""}
 
 
@@ -850,7 +792,6 @@ def _set_column_formats(writer, sheet_name: str, df: pd.DataFrame, semantic_map:
         semantic_type = meta["tipo_logico"]
         decimals = int(meta.get("casas_decimais", 0))
         is_diff = "diferen" in _norm_name(str(col))
-
         width = max(len(str(col)), min(60, ser.astype(str).map(len).max() if len(ser) else 10)) + 2
         fmt = _make_xlsx_format(wb, semantic_type, decimals, is_diff=is_diff)
         ws.set_column(i, i, width, fmt)
@@ -985,8 +926,8 @@ def _export_excel(
     resumo_exec: pd.DataFrame,
     detalhe: pd.DataFrame,
     ponte: pd.DataFrame,
-    catalog_a_df: pd.DataFrame,
-    catalog_b_df: pd.DataFrame,
+    key_pairs: List[dict],
+    value_pairs: List[dict],
     output_semantics: Dict[str, Dict[str, dict]],
     base1_name: str,
     base2_name: str,
@@ -1039,13 +980,112 @@ def _export_excel(
         _set_column_formats(writer, "Ponte_Conciliacao", ponte, semantic_map=output_semantics.get("ponte", {}))
         _add_total_row(writer, "Ponte_Conciliacao", ponte, semantic_map=output_semantics.get("ponte", {}), skip_when_only_total_geral=True)
 
-        catalog_a_df.to_excel(writer, sheet_name="Catalogo_Base1", index=False)
-        _set_column_formats(writer, "Catalogo_Base1", catalog_a_df)
+        mapa_chaves = pd.DataFrame([
+            {
+                "Base 1": r["a"],
+                "Base 2": r["b"],
+                "Nome da dimensão": r["label"],
+                "Tipo lógico": r.get("semantic_type", "texto"),
+                "Formato Excel": r.get("excel_format", ""),
+            }
+            for r in key_pairs
+        ])
+        mapa_valores = pd.DataFrame([
+            {
+                "Valor Base 1": r["a"],
+                "Valor Base 2": r["b"],
+                "Nome do valor": r["label"],
+                "Tipo lógico": r.get("semantic_type", "moeda"),
+                "Formato Excel": r.get("excel_format", ""),
+            }
+            for r in value_pairs
+        ])
 
-        catalog_b_df.to_excel(writer, sheet_name="Catalogo_Base2", index=False)
-        _set_column_formats(writer, "Catalogo_Base2", catalog_b_df)
+        if not mapa_chaves.empty:
+            mapa_chaves.to_excel(writer, sheet_name="Mapa_Chaves", index=False)
+            _set_column_formats(writer, "Mapa_Chaves", mapa_chaves)
+        if not mapa_valores.empty:
+            mapa_valores.to_excel(writer, sheet_name="Mapa_Valores", index=False)
+            _set_column_formats(writer, "Mapa_Valores", mapa_valores)
 
     return bio.getvalue()
+
+
+# ============================================================
+# UI helpers
+# ============================================================
+
+def _render_pair_line(df_a, df_b, cols_a, cols_b, row, idx, prefix: str, is_value: bool = False):
+    cols = st.columns([1.15, 1.15, 0.9, 0.7, 0.9])
+
+    with cols[0]:
+        a_col = st.selectbox(
+            f"{'Valor ' if is_value else ''}Base 1 #{idx+1}",
+            [""] + cols_a,
+            index=([""] + cols_a).index(row.get("a", "")) if row.get("a", "") in ([""] + cols_a) else 0,
+            key=f"{prefix}_a_{idx}",
+            label_visibility="collapsed",
+        )
+
+    with cols[1]:
+        b_col = st.selectbox(
+            f"{'Valor ' if is_value else ''}Base 2 #{idx+1}",
+            [""] + cols_b,
+            index=([""] + cols_b).index(row.get("b", "")) if row.get("b", "") in ([""] + cols_b) else 0,
+            key=f"{prefix}_b_{idx}",
+            label_visibility="collapsed",
+        )
+
+    inferred = _suggest_pair_semantics(df_a, df_b, a_col, b_col, prefer_value=is_value)
+    default_label = row.get("label") or _friendly_label(a_col, b_col)
+    current_type = row.get("semantic_type") or inferred["tipo_logico"]
+    current_format = row.get("excel_format") or inferred["formato_excel"]
+
+    with cols[2]:
+        label = st.text_input(
+            f"Nome #{idx+1}",
+            value=default_label,
+            key=f"{prefix}_lbl_{idx}",
+            label_visibility="collapsed",
+        )
+
+    with cols[3]:
+        semantic_type = st.selectbox(
+            f"Tipo lógico #{idx+1}",
+            options=SEMANTIC_TYPES,
+            index=SEMANTIC_TYPES.index(current_type) if current_type in SEMANTIC_TYPES else 0,
+            key=f"{prefix}_type_{idx}",
+            label_visibility="collapsed",
+        )
+
+    suggested_format = _excel_format_by_semantic_type(
+        semantic_type,
+        2 if semantic_type in ["moeda", "numero", "percentual"] else 0
+    )
+    final_format_default = current_format if _clean_text(current_format) else suggested_format
+
+    with cols[4]:
+        excel_format = st.text_input(
+            f"Formato Excel #{idx+1}",
+            value=final_format_default,
+            key=f"{prefix}_fmt_{idx}",
+            label_visibility="collapsed",
+        )
+
+    return {
+        "a": a_col,
+        "b": b_col,
+        "label": label,
+        "semantic_type": semantic_type,
+        "excel_format": excel_format,
+    }
+
+
+def _render_header_row(labels: List[str]):
+    cols = st.columns([1.15, 1.15, 0.9, 0.7, 0.9])
+    for col, label in zip(cols, labels):
+        with col:
+            st.markdown(f"**{label}**")
 
 
 # ============================================================
@@ -1084,113 +1124,33 @@ def main():
     cols_a = _get_column_list(tuple(df_a.columns))
     cols_b = _get_column_list(tuple(df_b.columns))
 
-    st.subheader("2) Leitura inteligente das colunas")
-    st.caption("A ferramenta sugere o tipo lógico, o papel da coluna e o formato esperado. Você pode ajustar dentro do próprio kit.")
-
-    default_catalog_a = _build_semantic_catalog(df_a)
-    default_catalog_b = _build_semantic_catalog(df_b)
-
-    e1, e2 = st.columns(2)
-
-    with e1:
-        st.markdown("**Base 1 — interpretação sugerida/editável**")
-        catalog_a = st.data_editor(
-            default_catalog_a,
-            key="cm_catalog_a",
-            use_container_width=True,
-            num_rows="fixed",
-            hide_index=True,
-            column_config={
-                "coluna": st.column_config.TextColumn("Coluna", disabled=True),
-                "tipo_logico": st.column_config.SelectboxColumn("Tipo lógico", options=SEMANTIC_TYPES),
-                "papel": st.column_config.SelectboxColumn("Papel", options=SEMANTIC_ROLES),
-                "casas_decimais": st.column_config.NumberColumn("Casas decimais", min_value=0, max_value=6, step=1),
-                "totaliza": st.column_config.CheckboxColumn("Totaliza"),
-                "formato_excel": st.column_config.TextColumn("Formato Excel"),
-            },
-        )
-
-    with e2:
-        st.markdown("**Base 2 — interpretação sugerida/editável**")
-        catalog_b = st.data_editor(
-            default_catalog_b,
-            key="cm_catalog_b",
-            use_container_width=True,
-            num_rows="fixed",
-            hide_index=True,
-            column_config={
-                "coluna": st.column_config.TextColumn("Coluna", disabled=True),
-                "tipo_logico": st.column_config.SelectboxColumn("Tipo lógico", options=SEMANTIC_TYPES),
-                "papel": st.column_config.SelectboxColumn("Papel", options=SEMANTIC_ROLES),
-                "casas_decimais": st.column_config.NumberColumn("Casas decimais", min_value=0, max_value=6, step=1),
-                "totaliza": st.column_config.CheckboxColumn("Totaliza"),
-                "formato_excel": st.column_config.TextColumn("Formato Excel"),
-            },
-        )
-
-    # Reaplica formato padrão com base no que o usuário editou
-    for catalog_df in [catalog_a, catalog_b]:
-        if not catalog_df.empty:
-            catalog_df["casas_decimais"] = pd.to_numeric(catalog_df["casas_decimais"], errors="coerce").fillna(0).astype(int)
-            catalog_df["formato_excel"] = [
-                _excel_format_by_semantic_type(t, d) if _clean_text(f) == "" else f
-                for t, d, f in zip(catalog_df["tipo_logico"], catalog_df["casas_decimais"], catalog_df["formato_excel"])
-            ]
-
-    catalog_map_a = _catalog_to_map(catalog_a)
-    catalog_map_b = _catalog_to_map(catalog_b)
-
-    st.subheader("3) Campos que identificam o mesmo registro nas duas bases")
-    st.caption("A chave encontra o registro correspondente.")
+    st.subheader("2) Campos que identificam o mesmo registro nas duas bases")
+    st.caption("Nesta etapa você define as chaves e já registra o tipo lógico e o formato esperado no Excel.")
+    _render_header_row(["Base 1", "Base 2", "Nome da dimensão", "Tipo lógico", "Formato Excel"])
 
     for i, row in enumerate(st.session_state["cm_key_rows"]):
-        k1, k2, k3 = st.columns([1.2, 1.2, 0.8])
-
-        with k1:
-            a_col = st.selectbox(f"Base 1 #{i+1}", [""] + cols_a, key=f"cm_key_a_{i}")
-
-        with k2:
-            b_suggest = row.get("b", "")
-            b_col = st.selectbox(
-                f"Base 2 #{i+1}",
-                [""] + cols_b,
-                index=([""] + cols_b).index(b_suggest) if b_suggest in ([""] + cols_b) else 0,
-                key=f"cm_key_b_{i}",
-            )
-
-        with k3:
-            label_default = row.get("label") or _friendly_label(a_col, b_col)
-            label = st.text_input(f"Nome da dimensão #{i+1}", value=label_default, key=f"cm_key_lbl_{i}")
-
-        st.session_state["cm_key_rows"][i] = {"a": a_col, "b": b_col, "label": label}
+        st.session_state["cm_key_rows"][i] = _render_pair_line(
+            df_a, df_b, cols_a, cols_b, row, i, prefix="cm_key", is_value=False
+        )
 
     if st.button("Adicionar par-chave"):
-        st.session_state["cm_key_rows"].append({"a": "", "b": "", "label": ""})
+        st.session_state["cm_key_rows"].append({"a": "", "b": "", "label": "", "semantic_type": "texto", "excel_format": ""})
         st.rerun()
 
-    st.subheader("4) Quais campos deseja confrontar para validar valores")
-    st.caption("Os valores medem o impacto da conciliação.")
+    st.subheader("3) Quais campos deseja confrontar para validar")
+    st.caption("Aqui você escolhe os valores que serão confrontados e já define o tipo lógico e o formato de saída.")
+    _render_header_row(["Valor Base 1", "Valor Base 2", "Nome do valor", "Tipo lógico", "Formato Excel"])
 
     for i, row in enumerate(st.session_state["cm_val_rows"]):
-        v1, v2, v3 = st.columns([1.2, 1.2, 0.8])
-
-        with v1:
-            a_col = st.selectbox(f"Valor Base 1 #{i+1}", [""] + cols_a, key=f"cm_val_a_{i}")
-
-        with v2:
-            b_col = st.selectbox(f"Valor Base 2 #{i+1}", [""] + cols_b, key=f"cm_val_b_{i}")
-
-        with v3:
-            label_default = row.get("label") or _friendly_label(a_col, b_col)
-            label = st.text_input(f"Nome do valor #{i+1}", value=label_default, key=f"cm_val_lbl_{i}")
-
-        st.session_state["cm_val_rows"][i] = {"a": a_col, "b": b_col, "label": label}
+        st.session_state["cm_val_rows"][i] = _render_pair_line(
+            df_a, df_b, cols_a, cols_b, row, i, prefix="cm_val", is_value=True
+        )
 
     if st.button("Adicionar campo de valor"):
-        st.session_state["cm_val_rows"].append({"a": "", "b": "", "label": ""})
+        st.session_state["cm_val_rows"].append({"a": "", "b": "", "label": "", "semantic_type": "moeda", "excel_format": 'R$ #,##0.00'})
         st.rerun()
 
-    st.subheader("5) Como deseja receber o resultado?")
+    st.subheader("4) Como deseja receber o resultado?")
     gerar_exec = st.checkbox("Gerar resumo executivo", value=True)
 
     valid_keys = [r for r in st.session_state["cm_key_rows"] if r.get("a") and r.get("b")]
@@ -1213,7 +1173,7 @@ def main():
             default=default_total
         ) if gerar_exec else []
 
-    st.subheader("6) Processar análise")
+    st.subheader("5) Processar análise")
     executar = st.button("Executar análise")
 
     if executar:
@@ -1251,8 +1211,6 @@ def main():
                 group_labels=group_labels if group_labels else [valid_keys[0]["label"]],
                 base1_name=base1_name,
                 base2_name=base2_name,
-                catalog_a=catalog_map_a,
-                catalog_b=catalog_map_b,
             )
 
             excel = _export_excel(
@@ -1260,8 +1218,8 @@ def main():
                 exec_df,
                 detail_df,
                 ponte_df,
-                catalog_a,
-                catalog_b,
+                valid_keys,
+                valid_vals,
                 output_semantics,
                 base1_name,
                 base2_name,
@@ -1285,7 +1243,7 @@ def main():
         st.download_button(
             "Baixar Excel da análise",
             data=excel,
-            file_name="Central_Analises_V30.xlsx",
+            file_name="Central_Analises_V31.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
